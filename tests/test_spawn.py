@@ -153,3 +153,64 @@ class SpawnBody(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoBody(Base):
+    """A launch whose body never shows (2026-10-26: the house was out of pids,
+    `claude --bg` started nothing, and nine DMs sat with a 👀 and no answer)."""
+
+    def setUp(self):
+        super().setUp()
+        self.b = SpawnBridge(self.root)
+        self.b.intent = {}                      # no body carries the token
+
+    def test_a_readable_registry_with_no_body_queues_a_retry(self):
+        state = {}
+        spawn.spawn_body(self.b, state, plan(), [msg(2)], attempt=1)
+        self.assertNotIn("owned", state)
+        self.assertEqual(state["retry_queue"], [{"chan": "R1", "msgs": [msg(2)], "attempt": 1, "members": ["pat"],
+                                                 "x": 1, "why": spawn.NEVER_STARTED}])
+        self.assertNotIn("unconfirmed", state)
+        self.assertEqual(self.b.pages, [])
+
+    def test_an_unreadable_registry_holds_it_and_pages_once(self):
+        real = self.b.agents
+        self.b.agents = lambda strict=False: None if strict else real()
+        state = {}
+        spawn.spawn_body(self.b, state, plan(), [msg(2)])
+        spawn.spawn_body(self.b, state, plan(chan="R2"), [msg(3)])
+        self.assertEqual([u["chan"] for u in state["unconfirmed"]], ["R1", "R2"])
+        self.assertEqual(state["unconfirmed"][0]["handle"], {"token": TOKEN})   # no set: it's saved as JSON
+        import json
+        json.dumps(state)
+        self.assertNotIn("retry_queue", state)
+        self.assertEqual(len(self.b.pages), 1)
+        self.assertIn("can't read its harness's registry", self.b.pages[0])
+
+    def test_when_the_registry_answers_a_held_launch_is_adopted_or_retried(self):
+        from shuttle import core
+        state = {"unconfirmed": [
+            {"chan": "R1", "msgs": [msg(2)], "attempt": 1, "members": ["pat"], "handle": {"token": "aa"}, "since": 900.0},
+            {"chan": "R2", "msgs": [msg(3)], "attempt": 1, "members": ["pat"], "handle": {"token": "bb"}, "since": 900.0},
+        ], "unconfirmed_paged": True}
+        self.b.runner.find = lambda handle, exclude: {"body-aa"} if handle["token"] == "aa" else set()
+        retries = []
+        core.settle_unconfirmed(self.b, state, retries)
+        self.assertEqual(state["owned"]["body-aa"]["chan"], "R1")
+        self.assertEqual(state["owned"]["body-aa"]["spawned_at"], 900.0)
+        self.assertEqual([(r["chan"], r["why"]) for r in retries], [("R2", spawn.NEVER_STARTED)])
+        self.assertEqual(state["unconfirmed"], [])
+        self.assertNotIn("unconfirmed_paged", state)
+
+
+class GiveUp(Base):
+    def test_giving_up_on_a_body_that_never_started_tells_the_person_and_pages(self):
+        from shuttle import dispatch
+        b = SpawnBridge(self.root)
+        sent = []
+        b.notify_failure = lambda chan, why, parked=False: sent.append((chan, why))
+        state = {"retry_queue": [{"chan": "R1", "msgs": [msg(2)], "attempt": b.cfg.max_attempts, "why": spawn.NEVER_STARTED}]}
+        dispatch.run_retries(b, state, {}, 0, [], {})
+        self.assertEqual(sent, [("R1", spawn.NEVER_STARTED)])
+        self.assertEqual(len(b.pages), 1)
+        self.assertIn("no body ever registered", b.pages[0])

@@ -61,6 +61,12 @@ class Runner:
         shows. The caller acts on the claim only when exactly one id comes back."""
         raise NotImplementedError
 
+    def find(self, handle, exclude):
+        """claim() in one look, without waiting: the bridge asks again later about
+        a launch it couldn't confirm. `handle` is what start() returned, minus
+        anything that isn't JSON (it is kept in state)."""
+        raise NotImplementedError
+
     def list(self, strict=False):
         """Every body the harness runs: [{"id", "status"}, ...]. When it can't
         tell: [], or None with strict=True (the reaper must not read a failed
@@ -182,15 +188,18 @@ class ClaudeRunner(Runner):
         other sleeve that started in the same 10s: a wake got owned as the wrong
         body, held that person's DM ~8 min, then was "retried" as
         died-without-reply (2026-10-16, t-1272)."""
-        marker = f"(bridge spawn token {handle['token']}:"
         for _ in range(self.CLAIM_POLLS):
             self.time.sleep(1)
-            new_ids = {aid for aid in {a.get("id") for a in self._agents()} - handle["before"]
-                       if aid and marker in self._intent(aid)}
-            new_ids -= set(exclude)   # never re-claim a body already owned
+            new_ids = self.find(handle, exclude)
             if new_ids:
                 return new_ids
         return set()
+
+    def find(self, handle, exclude):
+        marker = f"(bridge spawn token {handle['token']}:"
+        before = set(handle.get("before") or ())
+        return {aid for aid in {a.get("id") for a in self._agents()} - before
+                if aid and marker in self._intent(aid)} - set(exclude)   # never re-claim one already owned
 
     # ------------------------------------------------------------ the registry
 

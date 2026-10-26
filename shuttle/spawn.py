@@ -36,6 +36,32 @@ def resolve_model(b):
     return b.runner.resolve_model()
 
 
+NEVER_STARTED = "its body never started"
+
+
+def unclaimed(b, state, plan, batch, attempt, handle):
+    """A launch with no body to claim. If the registry answers, it never
+    started: retry it like a body that died without replying. If the registry
+    can't be read, it may be running unseen: hold it, page once, and let the
+    reaper settle it when the registry answers (core.settle_unconfirmed)."""
+    rec = {"chan": plan["chan"], "msgs": batch, "attempt": attempt,
+           "members": plan.get("members", []), **plan.get("rec", {})}
+    label = b.rec_label(rec)
+    if b.agents(strict=True) is not None:
+        print(f"no body for {label}: {NEVER_STARTED}; queued to retry", flush=True)
+        state.setdefault("retry_queue", []).append({**rec, "why": NEVER_STARTED})
+        return
+    keep = {k: v for k, v in handle.items() if k != "before"}   # a set: not JSON, and not needed later
+    state.setdefault("unconfirmed", []).append({**rec, "handle": keep, "since": b.time.time()})
+    print(f"no body seen for {label}: the registry can't be read; held unconfirmed", flush=True)
+    if not state.get("unconfirmed_paged"):
+        state["unconfirmed_paged"] = True
+        cfg = b._cfg()
+        b.page(f"{cfg.agent}-{cfg.name}: a reply couldn't be confirmed ({label}): the bridge can't read "
+               "its harness's registry, so messages may be going unanswered. Check the bridge's house "
+               "(pids, `claude agents`).")
+
+
 def spawn_body(b, state, plan, batch, attempt=1):
     """Launch a body for `batch` and claim it. Saves state before returning."""
     cfg = b._cfg()
@@ -68,6 +94,11 @@ def spawn_body(b, state, plan, batch, attempt=1):
         spawned_msgs[b.msg_key(m)] = now_ts
     # Claim the new body once it registers, never one already owned.
     owned_ids = runner.claim(handle, set(state.get("owned", {})))
+    if not owned_ids:
+        # The messages are already marked spawned (the dedup guard above), so a
+        # body that never shows would leave them unanswered for good, with the
+        # 👀 already on them (2026-10-26: nine DMs, the house out of pids).
+        unclaimed(b, state, plan, batch, attempt, handle)
     for nid in owned_ids:
         try:
             b.inbox.open_inbox(nid, plan["inbox_label"], chan, cfg.name)

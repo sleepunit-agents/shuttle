@@ -36,6 +36,7 @@ import sys
 import time
 
 from shuttle.runner import ClaudeRunner
+from shuttle.spawn import NEVER_STARTED
 
 
 # ---------------------------------------------------------------- state
@@ -526,6 +527,26 @@ def _check_death(b, state, aid, rec, retries, verb):
     return retry
 
 
+def settle_unconfirmed(b, state, retries):
+    """Launches held while the registry couldn't be read (spawn.unclaimed), now
+    that it can: a body that did start is adopted as owned, one that didn't is
+    retried. Either way the batch is no longer left unanswered."""
+    held = state.get("unconfirmed") or []
+    owned = state.setdefault("owned", {})
+    for u in held:
+        rec = {k: v for k, v in u.items() if k not in ("handle", "since")}
+        ids = b.runner.find(u.get("handle") or {}, set(owned))
+        if len(ids) == 1:
+            aid = next(iter(ids))
+            owned[aid] = {**rec, "idle_since": 0, "spawned_at": u.get("since", 0)}
+            print(f"adopted {aid[:8]} {b.rec_label(rec)}: it started while the registry was unreadable", flush=True)
+        else:
+            print(f"retrying {b.rec_label(rec)}: {NEVER_STARTED}", flush=True)
+            retries.append({**rec, "why": NEVER_STARTED})
+    state["unconfirmed"] = []
+    state.pop("unconfirmed_paged", None)
+
+
 def reap_and_count(b, state):
     """Reap bridge-owned bodies whose turn is over, and the two kinds that
     can't end themselves (parked on monitors, hung). Returns (live, retries):
@@ -550,6 +571,7 @@ def reap_and_count(b, state):
                    + b.runner.registry_hint.format(n=n, conv=b.CONV_NOUN))
         return len(owned), retries
     state["registry_failures"] = 0
+    settle_unconfirmed(b, state, retries)
     for a in present:
         aid = a.get("id")
         rec = owned.get(aid)
