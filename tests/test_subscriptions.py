@@ -366,7 +366,14 @@ class Subscriptions(unittest.TestCase):
         m = tool("ui", "--json")
         self.assertEqual((m["v"], m["tab"]["label"], m["tile"]["value"]), (2, "Subscriptions", "3"))
         page = tool("ui", "page", "--json", stdin=json.dumps({"path": ""}))
-        self.assertEqual([s["id"] for s in page["sections"]][:3], ["sub-chatgpt", "sub-main", "sub-spare"])
+        self.assertEqual([s["id"] for s in page["sections"]][:5], ["usage", "logins", "sub-chatgpt", "sub-main", "sub-spare"])
+        # Logins: a status row a credential, the section toned by its worst; accounts are kv cards
+        # with the credential table folded under Machine details.
+        logins = page["sections"][1]["blocks"][0]
+        self.assertEqual(logins["type"], "status")
+        self.assertTrue(all(i["tone"] in ("ok", "warn", "bad") and i["text"] for i in logins["items"]))
+        main = page["sections"][3]["blocks"]
+        self.assertEqual((main[0]["type"], main[1]["type"], main[1]["summary"]), ("kv", "details", "Machine details"))
         self.assertNotIn("sk-ant", json.dumps(page))
         ok = tool("ui", "act", "--json", stdin=json.dumps({"action": "assign", "fields": {"agent": "robin", "order": "spare,main"}}))
         self.assertTrue(ok["ok"], ok)
@@ -377,3 +384,32 @@ class Subscriptions(unittest.TestCase):
         self.assertTrue(added["ok"])
         self.assertIn("third", subs.load()["subscriptions"])
         self.assertEqual(tool("ui", "page", "--json", stdin=json.dumps({"path": "nope"}))["title"], "Not found")
+
+
+class LoginWords(unittest.TestCase):
+    """How a login reads on the page: how long it's good for, or what's wrong."""
+
+    def setUp(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("loom_subscriptions_tool", str(ROOT / "tools/loom-subscriptions"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        self.tool = importlib.util.module_from_spec(spec)
+        loader.exec_module(self.tool)
+
+    def test_words_and_tones(self):
+        now = 1_000_000_000
+        login = self.tool._login
+        self.assertEqual(login({"status": "valid", "expires": now + 41 * 86400 + 60}, now), ("ok", "Good for 41 days"))
+        self.assertEqual(login({"status": "valid", "expires": now + 2 * 86400 + 60}, now), ("warn", "Expires in 2 days"))
+        self.assertEqual(login({"status": "valid", "expires": now + 5 * 3600}, now), ("warn", "Expires in 5h"))
+        self.assertEqual(login({"status": "valid", "expires": now - 1}, now), ("bad", "Expired"))
+        self.assertEqual(login({"status": "expired"}, now), ("bad", "Expired"))
+        self.assertEqual(login({"status": "unknown", "error": "URLError"}, now), ("warn", "Unknown (URLError)"))
+        self.assertEqual(login({"status": "valid"}, now), ("ok", "Valid"))
+
+    def test_usage_meters_tone_as_they_fill(self):
+        d = {"subscriptions": {"main": {"label": "Main", "usage": {"5h": 0.27, "7d": 0.88, "checked": 1}}}}
+        m = self.tool._meters(d, 100)
+        self.assertEqual([(i["label"], i["value"], i.get("tone")) for i in m],
+                         [("Main · 5 hours", 0.27, None), ("Main · 7 days", 0.88, "warn")])

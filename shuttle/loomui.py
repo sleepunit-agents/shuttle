@@ -21,7 +21,7 @@ from pathlib import Path
 
 DAY = 86400
 RECONNECT_QUICK_S = 60      # a socket back up within this is a rotation, not an outage
-TABLE_ROWS = 200            # the contract's limit for rows
+LIST_ROWS = 200             # the contract's limit for a list's items
 
 
 # A bridge is dark after this long without a snapshot: 3 intervals, at least
@@ -276,19 +276,85 @@ NOT_FOUND = {"title": "Not found", "sections": []}
 
 
 def page(view, path, query=None):
+    """"": one row a bridge (the board's shape), who's talking now, the last
+    24h's conversations; "bridge/<name>": that bridge's numbers."""
+    if path.startswith("bridge/"):
+        b = next((b for b in view.bridges if b["name"] == path[len("bridge/"):]), None)
+        return _bridge_page(view, b) if b else dict(NOT_FOUND)
     if path != "":
         return dict(NOT_FOUND)
     caps = {(b["snap"].get("slots") or {}).get("cap") for b in view.bridges}
     who = view.agent_name or "the agent"
     intro = f"Where people talk to {who}. Each bridge watches a chat service and hands each conversation to a body"
     intro += f", up to {caps.pop()} at once." if len(caps) == 1 and None not in caps else "."
-    sections = [_bridge_section(view, b) for b in view.bridges[:7]]
+    sections = [_bridges(view)]
+    sections += [_dark_section(view, b) for b in view.bridges[:7] if b["dark"]]
+    talking = _talking(view)
+    if talking:
+        sections.append(talking)
     sections.append(_conversations(view))
     if view.rules is not None:
         sections.append(_rules(view.rules))
-    sections.append({"id": "signin", "title": "Sign in", "blocks": [
+    sections.append({"id": "signin", "title": "Sign in", "side": True, "blocks": [
         {"type": "link", "text": "Sign a harness in (Claude, Codex): its token goes into the secrets store", "page": "signin"}]})
     return {"title": "Bridges", "intro": intro, "sections": sections}
+
+
+def _state(view, b):
+    """(word, tone) for a bridge: dark, its socket's state, else running."""
+    sock = b["snap"].get("socket") if isinstance(b["snap"].get("socket"), dict) else None
+    if b["dark"]:
+        return f"No check in {_ago(view.now - b['at'])}", "bad"
+    if sock and sock.get("state") != "up":
+        return f"Socket {sock.get('state') or '?'}", "warn"
+    return "Up", "ok"
+
+
+def _bridges(view):
+    """One status row a bridge: its state, what it did today, how long since it checked in."""
+    per = view.stats()["per"]
+    items = []
+    for b in view.bridges[:7]:
+        word, tone = _state(view, b)
+        st = per.get(b["name"], {"turns": 0})
+        used = (b["snap"].get("slots") or {}).get("used", 0)
+        busy = f"{used} talking" if used and not b["dark"] else _plural(st["turns"], "turn") + " today"
+        items.append({"label": _title(b["name"]), "tone": tone, "text": f"{word} · {busy}",
+                      "meta": _ago(view.now - b["at"]), "page": f"bridge/{b['name']}"})
+    if not items:
+        return {"id": "bridges", "title": "", "blocks": [{"type": "text", "text": "No bridge has checked in yet.", "tone": "muted"}]}
+    return {"id": "bridges", "title": "", "blocks": [{"type": "status", "items": items}]}
+
+
+def _dark_section(view, b):
+    """A bridge that stopped checking in: what's known, and where to restart it."""
+    return {"id": _section_id(b["name"]), "title": _title(b["name"]), "tone": "bad", "blocks": [
+        {"type": "text", "text": _now_line(view, b)},
+        {"type": "link", "text": "Restart its house from Boxes", "page": "loom:p/box"}]}
+
+
+def _talking(view):
+    """Who each live bridge is talking to right now, and who's waiting."""
+    items = []
+    for b in view.bridges[:7]:
+        if b["dark"]:
+            continue
+        for t in b["snap"].get("talking") or []:
+            who = ", ".join(t.get("who") or []) or "nobody named"
+            bits = [f"active {_ago(t.get('active_s') or 0)}"] + (["stalled"] if t.get("stalled") else []) \
+                + ([f"{t['queued']} queued"] if t.get("queued") else [])
+            items.append({"text": who, "meta": f"{_title(b['name'])} · {_where(b['name'], t.get('venue'))} · {', '.join(bits)}",
+                          "tone": "warn" if t.get("stalled") else "ok"})
+        for w in b["snap"].get("waiting") or []:
+            who = ", ".join(w.get("who") or []) or "nobody named"
+            items.append({"text": who, "meta": f"{_title(b['name'])} · {_where(b['name'], w.get('venue'))} · waiting", "tone": "warn"})
+    return {"id": "talking", "title": "Talking now", "blocks": [{"type": "list", "items": items[:LIST_ROWS]}]} if items else None
+
+
+def _bridge_page(view, b):
+    sec = _bridge_section(view, b)
+    sec["title"] = ""
+    return {"title": _title(b["name"]), "sections": [sec, _conversations(view, only=b["name"])]}
 
 
 def _section_id(name):
@@ -364,18 +430,34 @@ def _socket_note(changes, bridge):
             f"{_title(bridge)} rotates it every few hours.")
 
 
-def _conversations(view):
+def _conversations(view, only=None):
     st = view.stats()
     people = _people(view.people_file) if view.people_file else {}
-    rows = []
+    items = []
     for (bridge, venue, who), c in sorted(st["convs"].items(), key=lambda kv: (-kv[1]["turns"], -kv[1]["last"])):
-        rows.append([f"{bridge} · {_where(bridge, venue)}", _who_cell(who, c["members"], people),
-                     str(c["turns"])])
-    if not rows:
+        if only and bridge != only:
+            continue
+        cell = _who_cell(who, c["members"], people)
+        text = cell["text"] if isinstance(cell, dict) else cell
+        item = {"text": text, "meta": f"{_title(bridge)} · {_where(bridge, venue)} · {_plural(c['turns'], 'turn')}"}
+        if len(who) == 1:
+            item["avatar"] = _initials(who[0])
+        if isinstance(cell, dict):
+            item["page"] = cell["page"]
+        items.append(item)
+    if not items:
         blocks = [{"type": "text", "text": "No conversations in the last 24h.", "tone": "muted"}]
     else:
-        blocks = [{"type": "table", "columns": ["Where", "With", "Turns"], "rows": rows[:TABLE_ROWS]}]
-    return {"id": "conversations", "title": "Conversations, last 24h", "blocks": blocks}
+        blocks = [{"type": "list", "items": items[:LIST_ROWS]}]
+    sec = {"id": "conversations", "title": "Conversations, last 24h", "blocks": blocks}
+    if not only:
+        sec["side"] = True
+    return sec
+
+
+def _initials(name):
+    words = [w for w in name.replace("-", " ").split() if w[:1].isalnum()]
+    return "".join(w[0] for w in words[:2]).upper() or "?"
 
 
 def _who_cell(who, members, people):
