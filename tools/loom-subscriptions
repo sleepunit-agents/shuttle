@@ -55,8 +55,13 @@ def manifest(d, now):
     for name, sub in d["subscriptions"].items():
         for c in sub["credentials"]:
             if c.get("status") == "expired":
-                asks.append({"text": f"{sub['label']}: {subs.KINDS[c['kind']]} ({subs.describe(c)}) is expired",
-                             "meta": "sign in again", "page": "", "label": "Look"})
+                ask = {"text": f"{sub['label']}: {subs.KINDS[c['kind']]} ({subs.describe(c)}) is expired",
+                       "meta": "sign in again", "page": "", "label": "Look", "tone": "bad"}
+                # The board's card: Renew login right on it (loom shows `actions` in place of the link).
+                harness = "claude" if sub["provider"] == "anthropic" else "codex"
+                if signin.installed(harness):
+                    ask["actions"] = [{"action": "signin-start", "label": "Renew login", "tone": "primary", "fields": {"sub": name}}]
+                asks.append(ask)
     # The board's tile: the fullest usage window there is, and when it resets.
     windows = [(float(sub["usage"][w]), sub["label"], label, sub["usage"].get(f"reset_{w}"))
                for sub in d["subscriptions"].values() for w, label in (("5h", "5 hours"), ("7d", "7 days"))

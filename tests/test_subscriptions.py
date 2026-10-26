@@ -426,3 +426,15 @@ class Tile(LoginWords):
         d["subscriptions"]["a"]["usage"]["5h"] = 0.9
         self.assertEqual(self.tool.manifest(d, 1)["tile"]["tone"], "warn")
         self.assertEqual(self.tool.manifest({"subscriptions": {}, "assign": {}}, 1)["tile"]["detail"], "none yet")
+
+
+class ExpiredAsk(LoginWords):
+    def test_an_expired_login_asks_with_a_renew_button(self):
+        d = {"subscriptions": {"main": {"label": "Main", "provider": "anthropic", "usage": {},
+                                        "credentials": [{"kind": "long-lived", "where": {"secret": "x"}, "status": "expired"}]}}, "assign": {}}
+        from unittest import mock
+        with mock.patch.object(self.tool.signin, "installed", return_value=True):
+            [ask] = self.tool.manifest(d, 1)["asks"]
+        self.assertEqual((ask["tone"], ask["actions"][0]["action"], ask["actions"][0]["fields"]), ("bad", "signin-start", {"sub": "main"}))
+        with mock.patch.object(self.tool.signin, "installed", return_value=False):
+            self.assertNotIn("actions", self.tool.manifest(d, 1)["asks"][0])
