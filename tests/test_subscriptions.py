@@ -413,3 +413,16 @@ class LoginWords(unittest.TestCase):
         m = self.tool._meters(d, 100)
         self.assertEqual([(i["label"], i["value"], i.get("tone")) for i in m],
                          [("Main · 5 hours", 0.27, None), ("Main · 7 days", 0.88, "warn")])
+
+
+class Tile(LoginWords):
+    def test_home_tile_is_the_fullest_window(self):
+        d = {"subscriptions": {
+            "a": {"label": "Claude", "credentials": [], "usage": {"5h": 0.27, "7d": 0.62, "reset_7d": 1_000_000_000}},
+            "b": {"label": "ChatGPT", "credentials": [], "usage": {}}}, "assign": {}}
+        t = self.tool.manifest(d, 1)["tile"]
+        self.assertEqual((t["value"], t["tone"]), ("62%", "ok"))
+        self.assertTrue(t["detail"].startswith("Claude · 7 days, resets "))
+        d["subscriptions"]["a"]["usage"]["5h"] = 0.9
+        self.assertEqual(self.tool.manifest(d, 1)["tile"]["tone"], "warn")
+        self.assertEqual(self.tool.manifest({"subscriptions": {}, "assign": {}}, 1)["tile"]["detail"], "none yet")
