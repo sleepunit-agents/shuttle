@@ -53,6 +53,10 @@ FULL = 0.97   # a window this used counts as out of room
 # login the broker holds in the store: it alone refreshes it, and a house gets
 # only the access token (a view with no refresh token), so nothing races it.
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# Every outbound call names its client: Cloudflare in front of platform.claude.com
+# answers Python's default User-Agent with 403 "error code: 1010", before the auth
+# server sees the request (2026-10-26: the broker's first refresh never got through).
+USER_AGENT = "claude-cli (loom subscriptions)"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -145,7 +149,7 @@ def probe_anthropic(token, urlopen=urllib.request.urlopen):
             "system": [{"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."}]}
     req = urllib.request.Request(API, data=json.dumps(body).encode(), method="POST", headers={
         "Authorization": f"Bearer {token}", "anthropic-version": "2023-06-01", "anthropic-beta": "oauth-2025-04-20",
-        "content-type": "application/json", "User-Agent": "claude-cli (loom subscriptions)", "x-app": "cli"})
+        "content-type": "application/json", "User-Agent": USER_AGENT, "x-app": "cli"})
     try:
         with urlopen(req, timeout=15) as r:
             status, headers = "valid", dict(r.headers.items())
@@ -216,7 +220,7 @@ def refresh_openai(auth, post=None):
     t = auth["tokens"]
     body = json.dumps({"client_id": OPENAI_CLIENT_ID, "grant_type": "refresh_token",
                        "refresh_token": t["refresh_token"], "scope": "openid profile email"}).encode()
-    req = urllib.request.Request(OPENAI_TOKEN_URL, data=body, method="POST", headers={"content-type": "application/json"})
+    req = urllib.request.Request(OPENAI_TOKEN_URL, data=body, method="POST", headers={"content-type": "application/json", "User-Agent": USER_AGENT})
     with (post or urllib.request.urlopen)(req, timeout=20) as r:
         got = json.loads(r.read())
     new = dict(auth)
@@ -231,7 +235,7 @@ def refresh_claude(o, post=None, now=None):
     result before anything else."""
     body = json.dumps({"grant_type": "refresh_token", "refresh_token": o["refreshToken"],
                        "client_id": CLAUDE_CLIENT_ID, "scope": CLAUDE_SCOPES}).encode()
-    req = urllib.request.Request(CLAUDE_TOKEN_URL, data=body, method="POST", headers={"content-type": "application/json"})
+    req = urllib.request.Request(CLAUDE_TOKEN_URL, data=body, method="POST", headers={"content-type": "application/json", "User-Agent": USER_AGENT})
     with (post or urllib.request.urlopen)(req, timeout=20) as r:
         got = json.loads(r.read())
     new = dict(o)
@@ -247,7 +251,7 @@ def claude_usage(token, urlopen=urllib.request.urlopen):
     """The account's usage windows, as fractions, from the usage endpoint (a
     session token can read it; a long-lived one can't)."""
     req = urllib.request.Request(CLAUDE_USAGE_URL, headers={"authorization": f"Bearer {token}",
-                                                            "anthropic-beta": "oauth-2025-04-20"})
+                                                            "anthropic-beta": "oauth-2025-04-20", "User-Agent": USER_AGENT})
     with urlopen(req, timeout=20) as r:
         got = json.loads(r.read())
     u = {"via": "usage endpoint"}

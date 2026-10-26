@@ -259,6 +259,34 @@ class Subscriptions(unittest.TestCase):
             subs.issue(d, "robin", "anthropic", store.__getitem__, store.__setitem__, now=now, post=refused_again, kind="session")
         self.assertEqual(posted, [1])
 
+    def test_every_outbound_call_names_its_client(self):
+        # Cloudflare in front of platform.claude.com answers Python's default
+        # User-Agent with 403 "error code: 1010" (2026-10-26: the broker's first
+        # refresh, and every one after, never reached the auth server).
+        seen = []
+
+        class Resp:
+            headers = {}
+            def __init__(self, b): self.b = b
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return self.b
+
+        def capture(body):
+            def call(req, timeout):
+                seen.append(req.get_header("User-agent"))
+                return Resp(body)
+            return call
+        now = 1_800_000_000
+        subs.refresh_claude({"refreshToken": "r"}, capture(json.dumps({"access_token": "a"}).encode()), now)
+        subs.refresh_openai({"tokens": {"refresh_token": "r"}}, capture(json.dumps({"access_token": "a"}).encode()))
+        subs.claude_usage("t", urlopen=capture(b"{}"))
+        subs.probe_anthropic("t", urlopen=capture(json.dumps({"content": []}).encode()))
+        self.assertEqual(len(seen), 4)
+        for ua in seen:
+            self.assertEqual(ua, subs.USER_AGENT)
+        self.assertNotIn("Python-urllib", subs.USER_AGENT)
+
     def test_an_agent_is_issued_only_its_own_through_the_api(self):
         from importlib.machinery import SourceFileLoader
         tool = SourceFileLoader("loom_subscriptions_tool", str(ROOT / "tools/loom-subscriptions")).load_module()
