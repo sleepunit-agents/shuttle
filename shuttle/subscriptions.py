@@ -346,8 +346,9 @@ def check(d, read_secret, only=None, probe=probe_anthropic, now=None, store=None
                 try:
                     o = fresh_claude_session(c, read_secret, store, now, post)
                     c.pop("error", None)
+                    c.pop("refresh_failed", None)
                 except Exception as e:  # only the kind: the text could carry a token
-                    c.update(status="unknown", checked=now, error=type(e).__name__)
+                    c.update(status="unknown", checked=now, error=type(e).__name__, refresh_failed=now)
                     continue
                 if o.get("subscriptionType") and not sub.get("plan"):
                     sub["plan"] = o["subscriptionType"].capitalize() + (f" ({o['rateLimitTier']})" if o.get("rateLimitTier") else "")
@@ -499,13 +500,20 @@ def secret_reader():
 def main(argv):
     d = load()
     if argv[:1] == ["check"]:
+        started = int(time.time())
         check(d, secret_reader(), argv[1] if len(argv) > 1 else None, store=store_secret)
         save(d)
         for name, sub in sorted(d["subscriptions"].items()):
             u = sub.get("usage") or {}
             print(f"{name}: " + ", ".join(f"{describe(c)} {c['status']}" for c in sub["credentials"])
                   + (f"; 5h {u['5h']:.0%}, 7d {u['7d']:.0%}" if "5h" in u and "7d" in u else ""))
-        return 0
+        # A login this check couldn't refresh fails the check, so whatever runs it
+        # (a unit's OnFailure=) can say so: a lapsed login stops every house that uses it.
+        failed = [(name, c) for name, sub in sorted(d["subscriptions"].items()) for c in sub["credentials"]
+                  if c.get("refresh_failed", 0) >= started]
+        for name, c in failed:
+            print(f"{name}: {c['where'].get('secret', describe(c))} couldn't be refreshed ({c.get('error', 'error')})", file=sys.stderr)
+        return 1 if failed else 0
     kind = argv[argv.index("--kind") + 1] if "--kind" in argv[:-1] else None
     argv = [a for i, a in enumerate(argv) if a != "--kind" and (i == 0 or argv[i - 1] != "--kind")]
     if argv[:1] == ["issue"] and len(argv) == 3:
