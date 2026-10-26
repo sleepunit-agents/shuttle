@@ -141,6 +141,8 @@ class CodexRunner(Runner):
         """The key start() picked: known at launch, nothing to wait for."""
         return {handle["key"]} - set(exclude)
 
+    find = claim
+
     # ------------------------------------------------------------ one run, from disk
 
     def _run(self, aid):

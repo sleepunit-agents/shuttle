@@ -97,6 +97,9 @@ def run_retries(b, state, holds, live, retries, ctx):
             if auth:
                 b.page(f"{cfg.agent}-{cfg.name} bridge giving up {label} after {rec['attempt']} "
                        f"attempts — auth failure ({why}). {b.runner.auth_hint}")
+            elif why == core.NEVER_STARTED:
+                b.page(f"{cfg.agent}-{cfg.name} bridge giving up {label} after {rec['attempt']} "
+                       f"attempts — {why}: no body ever registered. Check the bridge's house (pids, the harness).")
             continue
         msgs = rec.get("msgs") or []
         verdict, conv = b.admit(state, rec.get("chan"), msgs, "retry", ctx)
