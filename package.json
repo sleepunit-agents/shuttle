@@ -1,0 +1,24 @@
+{
+  "name": "shuttle",
+  "version": "0.1.0",
+  "description": "The shared core of Art's chat bridges, and the subscriptions piece",
+  "private": true,
+  "bin": {
+    "loom-shuttle": "tools/loom-shuttle",
+    "loom-subscriptions": "tools/loom-subscriptions"
+  },
+  "license": "AGPL-3.0-or-later",
+  "loom": {
+    "name": "shuttle",
+    "role": "bridges",
+    "label": "Shuttle",
+    "description": "Chat bridges (Discord, Slack) and the household's model subscriptions: accounts, sign-ins, usage.",
+    "settings": [
+      {
+        "name": "SHUTTLE_INSTANCE",
+        "label": "The instance file",
+        "hint": "the agent's shuttle.json: its bridges, routes and people. Without it, the Bridges page is empty; subscriptions work regardless"
+      }
+    ]
+  }
+}
