@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""loom-shuttle: the shuttle as a loom piece (loom docs/extensions.md, "The page").
+
+    loom shuttle ui --json          the manifest: the Bridges tab, its Home tile, asks
+    loom shuttle ui page --json     stdin {"path": "...", "query": {...}} -> one page
+    loom shuttle ui act --json      stdin {"action", "path", "fields"} -> {ok, message, page}
+
+Pages: "" (the bridges), "signin" (each harness's sign-in), "signin/<id>" (one
+sign-in under way). Actions: signin-start {harness}, signin-code {id, code}
+(shuttle/signin.py: the harness's own login, the token straight into the
+secrets store).
+
+Put this on PATH as `loom-shuttle` (a symlink is fine). The instance comes
+from $SHUTTLE_INSTANCE, the same as the bridges.
+"""
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from shuttle import instance, loomui, signin  # noqa: E402
+from shuttle import signin_page as signin_page_mod  # noqa: E402
+import subprocess  # noqa: E402
+
+USAGE = "usage: loom shuttle ui [page|act] --json\n"
+
+
+def _request():
+    try:
+        req = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return {}
+    return req if isinstance(req, dict) else {}
+
+
+def _stored():
+    """Names in the secrets store (never values)."""
+    try:
+        r = subprocess.run(["loom", "secrets", "list", "--json"], capture_output=True, text=True, timeout=5)
+        names = json.loads(r.stdout) if r.returncode == 0 else []
+        return {n if isinstance(n, str) else n.get("name") for n in names}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return set()
+
+
+def signin_page(path):
+    if path == "signin":
+        have = _stored()
+        rows, forms = [], []
+        for key, h in signin.HARNESSES.items():
+            inst = signin.installed(key)
+            rows.append([h["label"], "installed" if inst else f"not installed ({h['command'][0]})",
+                         ("in the store" if h["secret"] in have else "not yet") if h["secret"] else "kept by this machine",
+                         h["secret"] or "-"])
+            if inst:
+                forms.append({"type": "form", "title": f"Sign in to {h['label']}", "action": "signin-start",
+                              "submit": "Start", "hidden": {"harness": key}, "note": h["note"], "fields": []})
+        return {"title": "Sign in", "intro": "Each harness's own login; the token goes straight into the "
+                "secrets store, where the houses get it, and never comes back to this page.",
+                "sections": [{"id": "harnesses", "title": "Harnesses", "blocks": [
+                    {"type": "table", "columns": ["Harness", "Here", "Token", "Secret"], "rows": rows}, *forms]}]}
+    return signin_page_mod.progress_page(path[len("signin/"):])
+
+
+def act(req):
+    action, fields = req.get("action"), req.get("fields") if isinstance(req.get("fields"), dict) else {}
+    if action == "signin-start":
+        return signin_page_mod.start_act(fields.get("harness"))
+    if action == "signin-code":
+        return signin_page_mod.code_act(fields)
+    return {"ok": False, "message": "The shuttle's page doesn't do that."}
+
+
+def main(argv):
+    args = [a for a in argv if a != "--json"]
+    if args[:1] != ["ui"] or len(args) > 2 or (len(args) == 2 and args[1] not in ("page", "act")):
+        sys.stderr.write(USAGE)
+        return 2
+    if args[1:] == ["act"]:
+        print(json.dumps(act(_request())))
+        return 0
+    if args[1:] == ["page"]:
+        req = _request()
+        path = req.get("path") if isinstance(req.get("path"), str) else ""
+        if path == "signin" or path.startswith("signin/"):
+            print(json.dumps(signin_page(path)))
+            return 0
+        out = loomui.page(loomui.View.of(instance.load()), path, req.get("query"))
+        print(json.dumps(out))
+        return 0
+    print(json.dumps(loomui.manifest(loomui.View.of(instance.load()))))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

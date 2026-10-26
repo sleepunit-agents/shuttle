@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""loom-subscriptions: the household's model subscriptions, as a loom piece
+(shuttle/subscriptions.py): each account, whose it is, its credentials and
+their status, its usage, and which agent runs on what.
+
+    loom subscriptions list                      every subscription, its credentials and usage
+    loom subscriptions check [SUB]               probe the credentials now
+    loom subscriptions pick AGENT [PROVIDER]     the secret an agent's next body runs on
+    loom subscriptions issue AGENT PROVIDER      what its next house gets (house-safe; the value on stdout)
+    loom subscriptions add NAME --provider anthropic|openai [--label L] [--owner O] [--plan P] [--email E]
+    loom subscriptions credential SUB --kind long-lived|session|api-key|device (--secret NAME | --file PATH [--key VAR]) [--note N]
+    loom subscriptions assign AGENT SUB[,SUB…]   an agent's order: the first with room left is used
+    loom subscriptions ui [page|act] --json      loom's page (the Subscriptions tab)
+    loom subscriptions api --json                loom's piece API: POST /api/subscriptions/run {argv}
+                                                 (an agent's house re-fetches its own issue: a session view
+                                                 lasts hours, the house outlives it)
+
+A credential is a name (a secret in the store, or a file on loom's machine),
+never a value. The instance (for reading a secret to check it) comes from
+$SHUTTLE_INSTANCE.
+"""
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from shuttle import signin, subscriptions as subs  # noqa: E402
+from shuttle import signin_page  # noqa: E402
+
+ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _ago(t, now):
+    if not t:
+        return "never"
+    s = int(now - t)
+    return f"{s // 60}m ago" if s < 3600 else f"{s // 3600}h ago" if s < 86400 else f"{s // 86400}d ago"
+
+
+def _usage(sub, now):
+    u = sub.get("usage") or {}
+    parts = []
+    for w, label in (("5h", "5 hours"), ("7d", "7 days")):
+        if u.get(w) is not None:
+            reset = u.get(f"reset_{w}")
+            parts.append(f"{label} {u[w]:.0%}" + (f" (resets {time.strftime('%a %H:%M', time.localtime(reset))})" if reset else ""))
+    return (" · ".join(parts) + f", checked {_ago(u.get('checked'), now)}") if parts else "not read yet"
+
+
+def manifest(d, now):
+    asks = []
+    for name, sub in d["subscriptions"].items():
+        for c in sub["credentials"]:
+            if c.get("status") == "expired":
+                asks.append({"text": f"{sub['label']}: {subs.KINDS[c['kind']]} ({subs.describe(c)}) is expired",
+                             "meta": "sign in again", "page": "", "label": "Look"})
+    first = next(iter(sorted(d["subscriptions"].items())), None)
+    detail = f"{first[1]['label']}: {_usage(first[1], now)}" if first else "none yet"
+    return {"v": 2, "tab": {"label": "Subscriptions"},
+            "tile": {"label": "Subscriptions", "value": f"{len(d['subscriptions'])}", "detail": detail[:160],
+                     "tone": "bad" if asks else "ok", "page": ""},
+            "asks": asks[:10]}
+
+
+def overview(d, now):
+    sections = []
+    for name, sub in sorted(d["subscriptions"].items())[:7]:
+        rows = [[subs.KINDS[c["kind"]], subs.describe(c), c.get("status", "unknown") + (f" ({c['error'][:60]})" if c.get("error") else ""),
+                 _ago(c.get("checked"), now), c.get("note", "")[:80]] for c in sub["credentials"]]
+        blocks = [
+            {"type": "kv", "items": [
+                {"label": "Provider", "value": subs.PROVIDERS[sub["provider"]]},
+                {"label": "Plan", "value": sub.get("plan") or "not given"},
+                {"label": "Whose", "value": sub.get("owner") or "not given"},
+                {"label": "Usage", "value": _usage(sub, now)}]},
+            {"type": "table", "columns": ["Credential", "Where", "Status", "Checked", "Note"], "rows": rows} if rows
+            else {"type": "text", "text": "No credentials yet: sign in below.", "tone": "muted"},
+        ]
+        buttons = [{"action": "check", "label": "Check now", "fields": {"sub": name}}]
+        harness = "claude" if sub["provider"] == "anthropic" else "codex"
+        if signin.installed(harness):
+            buttons.append({"action": "signin-start", "label": "Sign in a new " + ("long-lived token" if harness == "claude" else "device login"),
+                            "tone": "primary", "fields": {"sub": name}})
+        if sub["provider"] == "anthropic" and signin.installed("claude-broker"):
+            buttons.append({"action": "signin-broker", "label": "Sign in a session login for houses (remote-control in a house)", "fields": {"sub": name}})
+        if sub["provider"] == "anthropic" and signin.installed("claude-session"):
+            buttons.append({"action": "signin-session", "label": "Sign loom's machine in (session login, for remote-control)", "fields": {"sub": name}})
+        blocks.append({"type": "buttons", "items": buttons})
+        sections.append({"id": f"sub-{name}", "title": sub["label"], "blocks": blocks})
+    agents = sorted(d["assign"].items())
+    sections.append({"id": "who", "title": "Who runs on what", "blocks": [
+        {"type": "text", "text": "Each agent's order: its next body runs on the first with a valid credential and room left, so one running out falls to the next.", "tone": "muted"},
+        {"type": "table", "columns": ["Agent", "Order"], "rows": [[a, " → ".join(o)] for a, o in agents]} if agents
+        else {"type": "text", "text": "No orders yet: an agent uses any subscription of the provider.", "tone": "muted"},
+        {"type": "form", "title": "Set an agent's order", "action": "assign", "submit": "Save", "fields": [
+            {"name": "agent", "label": "Agent", "kind": "text", "required": True},
+            {"name": "order", "label": "Subscriptions, in order", "kind": "text", "required": True, "hint": "names, comma separated"}]},
+    ]})
+    sections.append({"id": "add", "title": "Add a subscription", "blocks": [
+        {"type": "form", "action": "add", "submit": "Add", "fields": [
+            {"name": "name", "label": "Name", "kind": "text", "required": True, "hint": "lowercase, like home-max"},
+            {"name": "label", "label": "Label", "kind": "text"},
+            {"name": "provider", "label": "Provider", "kind": "choice", "value": "anthropic",
+             "options": [{"value": k, "label": v} for k, v in subs.PROVIDERS.items()]},
+            {"name": "plan", "label": "Plan", "kind": "text", "hint": "Pro, Max, Team…"},
+            {"name": "owner", "label": "Whose", "kind": "text"}]}]})
+    return {"title": "Subscriptions", "intro": "The accounts the agents run on: whose each is, its ways in and whether they work, and how much of it is used.",
+            "sections": sections}
+
+
+def act(d, req):
+    action = req.get("action")
+    f = req.get("fields") if isinstance(req.get("fields"), dict) else {}
+    try:
+        if action == "add":
+            subs.add_subscription(d, (f.get("name") or "").strip(), f.get("provider") or "anthropic", f.get("label") or "",
+                                  owner=f.get("owner") or "", plan=f.get("plan") or "")
+            subs.save(d)
+            return {"ok": True, "message": f"Added {f.get('name')}. Sign it in, or register a credential (loom subscriptions credential).", "page": ""}
+        if action == "assign":
+            order = [x.strip() for x in (f.get("order") or "").split(",") if x.strip()]
+            missing = [x for x in order if x not in d["subscriptions"]]
+            agent = (f.get("agent") or "").strip()
+            if not subs.NAME.match(agent) or not order or missing:
+                return {"ok": False, "message": f"An agent's name and an order of subscriptions that exist{': no ' + ', '.join(missing) if missing else ''}."}
+            d["assign"][agent] = order
+            subs.save(d)
+            return {"ok": True, "message": f"{agent} runs on {' → '.join(order)}.", "page": ""}
+        if action == "check":
+            sub = f.get("sub")
+            if sub not in d["subscriptions"]:
+                return {"ok": False, "message": "No subscription by that name."}
+            # In the background: a probe can take longer than a page's action may.
+            subprocess.Popen([sys.executable, "-m", "shuttle.subscriptions", "check", sub], cwd=ROOT, start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {"ok": True, "message": f"Checking {sub}; reload in a few seconds.", "page": ""}
+        if action == "signin-start":
+            sub = d["subscriptions"].get(f.get("sub"))
+            if not sub:
+                return {"ok": False, "message": "No subscription by that name."}
+            harness = "claude" if sub["provider"] == "anthropic" else "codex"
+            secret = f"{'claude' if harness == 'claude' else 'codex'}-{f['sub']}" + ("-auth.json" if harness == "codex" else "")
+            return signin_page.start_act(harness, secret=secret, subscription=f["sub"], back="")
+        if action == "signin-broker":
+            if f.get("sub") not in d["subscriptions"]:
+                return {"ok": False, "message": "No subscription by that name."}
+            return signin_page.start_act("claude-broker", secret=f"claude-session-{f['sub']}.json", subscription=f["sub"], back="")
+        if action == "signin-session":
+            if f.get("sub") not in d["subscriptions"]:
+                return {"ok": False, "message": "No subscription by that name."}
+            return signin_page.start_act("claude-session", subscription=f["sub"], back="")
+        if action == "signin-code":
+            return signin_page.code_act(f, back="")
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+    return {"ok": False, "message": "The subscriptions page doesn't do that."}
+
+
+def api_answer(d, request, run):
+    """{caller, path, body:{argv}} -> {status, body}. Only issue, and an agent
+    only for itself, when it has an order here: the owner may name any agent."""
+    def refuse(status, error):
+        return {"status": status, "body": {"error": error}}
+    if not isinstance(request, dict):
+        return refuse(400, "not a piece API request")
+    caller = request.get("caller") or {}
+    if request.get("path") != "run":
+        return refuse(404, "the one call is run")
+    argv = (request.get("body") or {}).get("argv")
+    if not isinstance(argv, list) or not 3 <= len(argv) <= 5 or not all(isinstance(a, str) and 0 < len(a) <= 64 for a in argv):
+        return refuse(400, "argv is: issue AGENT PROVIDER [--kind session]")
+    if argv[0] != "issue" or argv[2] not in subs.PROVIDERS or argv[3:] not in ([], ["--kind", "session"]):
+        return refuse(403, "through the API: issue AGENT PROVIDER [--kind session]")
+    if caller.get("kind") == "agent":
+        if argv[1] != caller.get("agent"):
+            return refuse(403, "an agent is issued only its own")
+    elif caller.get("kind") != "owner":
+        return refuse(403, "only the owner and the agents with an order here")
+    if argv[1] not in d["assign"]:
+        return refuse(403, f"{argv[1]} has no order here")
+    code, out, err = run(argv)
+    return {"status": 200, "body": {"exit": code, "stdout": out, "stderr": err[-4000:]}}
+
+
+def _request():
+    try:
+        r = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return {}
+    return r if isinstance(r, dict) else {}
+
+
+def flag(argv, name):
+    return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else None
+
+
+def main(argv):
+    d, now = subs.load(), time.time()
+    args = [a for a in argv if a != "--json"]
+    if args[:1] == ["ui"]:
+        if args[1:] == []:
+            print(json.dumps(manifest(d, now)))
+        elif args[1:] == ["page"]:
+            path = _request().get("path") or ""
+            out = overview(d, now) if path == "" else signin_page.progress_page(path[len("signin/"):], back="") if path.startswith("signin/") \
+                else {"title": "Not found", "sections": []}
+            print(json.dumps(out))
+        elif args[1:] == ["act"]:
+            print(json.dumps(act(d, _request())))
+        else:
+            return 2
+        return 0
+    if args == ["api"]:
+        def run(argv):
+            r = subprocess.run([sys.executable, "-m", "shuttle.subscriptions", *argv], cwd=ROOT, capture_output=True,
+                               text=True, timeout=40, stdin=subprocess.DEVNULL)
+            return r.returncode, r.stdout, r.stderr
+        print(json.dumps(api_answer(d, _request(), run)))
+        return 0
+    try:
+        if args[:1] == ["list"]:
+            for name, sub in sorted(d["subscriptions"].items()):
+                print(f"{name}  {subs.PROVIDERS[sub['provider']]} {sub.get('plan', '')}  whose: {sub.get('owner') or '-'}  usage: {_usage(sub, now)}")
+                for c in sub["credentials"]:
+                    print(f"    {subs.KINDS[c['kind']]:<16} {subs.describe(c):<48} {c.get('status', 'unknown'):<8} checked {_ago(c.get('checked'), now)}  {c.get('note', '')}")
+            for a, o in sorted(d["assign"].items()):
+                print(f"{a} runs on: {' → '.join(o)}")
+            return 0
+        if args[:1] in (["check"], ["pick"], ["issue"]):
+            return subs.main(args)
+        if args[:1] == ["add"] and len(args) >= 2:
+            subs.add_subscription(d, args[1], flag(args, "--provider") or "anthropic", flag(args, "--label") or "",
+                                  owner=flag(args, "--owner") or "", plan=flag(args, "--plan") or "", email=flag(args, "--email") or "")
+            subs.save(d)
+            return 0
+        if args[:1] == ["credential"] and len(args) >= 2:
+            subs.add_credential(d, args[1], flag(args, "--kind") or "long-lived", secret=flag(args, "--secret"),
+                                file=flag(args, "--file"), key=flag(args, "--key"), note=flag(args, "--note") or "")
+            subs.save(d)
+            return 0
+        if args[:1] == ["assign"] and len(args) == 3:
+            order = [x for x in args[2].split(",") if x]
+            if any(x not in d["subscriptions"] for x in order) or not subs.NAME.match(args[1]):
+                print("assign AGENT SUB[,SUB…]: subscriptions that exist", file=sys.stderr)
+                return 2
+            d["assign"][args[1]] = order
+            subs.save(d)
+            return 0
+    except ValueError as e:
+        print(f"loom subscriptions: {e}", file=sys.stderr)
+        return 2
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,406 @@
+"""loomui: the shuttle on loom's page (contract v2), from fixture now-dirs."""
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from shuttle import loomui
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# 1 March, noon local: the last 24h reach back into February's events file.
+NOW = time.mktime((2026, 3, 1, 12, 0, 0, 0, 0, -1))
+MIDNIGHT = time.mktime((2026, 3, 1, 0, 0, 0, 0, 0, -1))
+
+
+def snap(bridge, at, talking=(), waiting=(), interval=15, used=None, cap=5, socket=None):
+    talking = list(talking)
+    return {"v": 1, "agent": "a", "bridge": bridge, "at": at, "interval_s": interval,
+            "slots": {"used": len(talking) if used is None else used, "cap": cap},
+            "mem_mb": 1000, "socket": socket, "talking": talking, "waiting": list(waiting)}
+
+
+def ev(t, bridge, kind, **f):
+    return {"v": 1, "t": t, "agent": "a", "bridge": bridge, "kind": kind, **f}
+
+
+# ---------------------------------------------------------------- the contract's shape
+
+TONES = {"ok", "warn", "bad", "muted"}
+SECTION_ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+PATH = re.compile(r"^[a-z0-9._~/-]{0,200}$")
+
+
+def check_str(t, s):
+    t.assertIsInstance(s, str)
+    t.assertLessEqual(len(s), 2000)
+
+
+def check_page_link(t, p):
+    check_str(t, p)
+    p = p[5:] if p.startswith("loom:") else p
+    t.assertRegex(p, PATH)
+    t.assertNotIn("..", p.split("/"))
+
+
+def check_tone(t, o):
+    if "tone" in o:
+        t.assertIn(o["tone"], TONES)
+
+
+def check_block(t, b):
+    kind = b["type"]
+    if kind == "stats":
+        for i in b["items"]:
+            check_str(t, i["label"]), check_str(t, i["value"]), check_tone(t, i)
+    elif kind == "text":
+        check_str(t, b["text"]), check_tone(t, b)
+    elif kind == "kv":
+        for i in b["items"]:
+            check_str(t, i["label"]), check_str(t, i["value"])
+    elif kind == "table":
+        t.assertLessEqual(len(b["columns"]), 12)
+        t.assertLessEqual(len(b["rows"]), 200)
+        for row in b["rows"]:
+            t.assertLessEqual(len(row), len(b["columns"]))
+            for cell in row:
+                if isinstance(cell, dict):
+                    t.assertEqual(set(cell), {"text", "page"})
+                    check_str(t, cell["text"]), check_page_link(t, cell["page"])
+                else:
+                    check_str(t, cell)
+    elif kind == "link":
+        check_str(t, b["text"])
+        if "page" in b:
+            check_page_link(t, b["page"])
+        else:
+            t.assertTrue(b["href"].startswith(("http://", "https://")))
+    else:
+        t.fail(f"unexpected block {kind!r}")
+
+
+def check_page(t, page):
+    check_str(t, page["title"])
+    t.assertLessEqual(len(page["sections"]), 10)
+    for s in page["sections"]:
+        t.assertRegex(s["id"], SECTION_ID)
+        check_tone(t, s)
+        t.assertLessEqual(len(s["blocks"]), 20)
+        for b in s["blocks"]:
+            check_block(t, b)
+    t.assertLess(len(json.dumps(page)), 512 * 1024)
+    t.assertNotIn("buttons", json.dumps(page))
+    t.assertNotIn("form", [b["type"] for s in page["sections"] for b in s["blocks"]])
+
+
+class Fixture(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="shuttle-loomui-"))
+        self.people = self.dir / "people.json"
+
+    def write(self, s):
+        (self.dir / f"{s['bridge']}.json").write_text(json.dumps(s))
+
+    def events(self, month, recs):
+        with open(self.dir / f"events-{month}.jsonl", "a") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+
+    def view(self, now=NOW, **kw):
+        kw.setdefault("rules", {"guest_deny": ["mcp__mail", "mcp__calendar"],
+                                "always_deny": ["mcp__handoff"], "preferred_model": "model-x"})
+        kw.setdefault("people_file", self.people)
+        kw.setdefault("agent_name", "Robin")
+        return loomui.View(self.dir, now=now, **kw)
+
+
+# ---------------------------------------------------------------- the manifest
+
+
+class Manifest(Fixture):
+    def test_live_bridges_tile_and_no_asks(self):
+        self.write(snap("chat", NOW - 5, talking=[{"venue": "#general", "who": ["Pat"], "active_s": 60}]))
+        self.write(snap("talk", NOW - 2, interval=5, socket={"state": "up"}))
+        m = loomui.manifest(self.view())
+        self.assertEqual(m["v"], 2)
+        self.assertEqual(m["tab"], {"label": "Bridges"})
+        self.assertEqual(m["tile"], {"label": "Bridges", "value": "2 live", "detail": "#general, now",
+                                     "tone": "ok", "page": ""})
+        self.assertEqual(m["asks"], [])
+
+    def test_detail_is_the_latest_conversation_else_idle(self):
+        self.write(snap("chat", NOW - 5))
+        self.assertEqual(loomui.manifest(self.view())["tile"]["detail"], "idle")
+        self.events("2026-03", [ev(NOW - 600, "chat", "picked", cid="c-1", venue="#general", who=["Pat"], wait_s=3),
+                                ev(NOW - 60, "chat", "finished", cid="c-1", venue="#general", outcome="replied")])
+        self.assertEqual(loomui.manifest(self.view())["tile"]["detail"], "#general, 60s ago")
+
+    def test_a_dm_says_who(self):
+        self.write(snap("talk", NOW - 1))
+        self.events("2026-03", [ev(NOW - 120, "talk", "picked", cid="c-2", venue="talk-dm", who=["Sam Lee"], wait_s=1)])
+        self.assertEqual(loomui.manifest(self.view())["tile"]["detail"], "DM with Sam Lee, 2m ago")
+
+    def test_a_dark_bridge_is_an_ask(self):
+        dark_at = NOW - 3600
+        self.write(snap("chat", NOW - 5))
+        self.write(snap("talk", dark_at, interval=5))
+        m = loomui.manifest(self.view())
+        self.assertEqual(m["tile"]["value"], "1 live")
+        self.assertEqual(m["tile"]["tone"], "bad")
+        [ask] = m["asks"]
+        self.assertEqual(ask["text"], "Talk bridge is dark since " + time.strftime("%H:%M", time.localtime(dark_at)))
+        self.assertEqual(ask["page"], "")
+        self.assertEqual(ask["meta"], "no word from it for 60m")
+
+    def test_dark_is_three_intervals_at_least_30s(self):
+        self.write(snap("chat", NOW - 29, interval=5))
+        self.assertEqual(loomui.manifest(self.view())["asks"], [])
+        self.write(snap("chat", NOW - 46, interval=15))
+        self.assertEqual(len(loomui.manifest(self.view())["asks"]), 1)
+
+    def test_no_bridges_at_all(self):
+        m = loomui.manifest(self.view())
+        self.assertEqual(m["tile"]["value"], "0 live")
+        self.assertEqual(m["asks"], [])
+
+
+# ---------------------------------------------------------------- the page
+
+
+class Page(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.write(snap("chat", NOW - 4, talking=[{"cid": "c-1", "chan": "x", "venue": "#general", "who": ["Pat"],
+                                                   "active_s": 4, "stalled": False, "queued": 2,
+                                                   "body": "secret-body-id", "text": "message content"}],
+                        waiting=[{"venue": "#b", "who": ["Sam"], "reason": "slots_full"}]))
+        self.write(snap("talk", NOW - 2, interval=5, socket={"state": "up", "since": NOW - 100}))
+        evs = [
+            ev(MIDNIGHT + 60, "chat", "picked", cid="c-1", venue="#general", who=["Pat"], wait_s=20, body="b1"),
+            ev(MIDNIGHT + 70, "chat", "delivered", cid="c-1", venue="#general", who=["Pat"], n=1, body="b1"),
+            ev(MIDNIGHT + 90, "chat", "picked", cid="c-1", venue="#general", who=["Pat"], wait_s=28, body="b2"),
+            ev(NOW - 50, "talk", "picked", cid="c-2", venue="talk-dm", who=["Sam Lee"],
+               members=["sam-lee"], wait_s=6, body="b3"),
+        ]
+        # Socket rotations: down, up 2s later, every few hours.
+        for k in range(3):
+            t = NOW - 3600 * (1 + 4 * k)
+            evs += [ev(t, "talk", "socket", state="down", since=t), ev(t + 2, "talk", "socket", state="up", since=t + 2)]
+        self.events("2026-03", sorted(evs, key=lambda r: r["t"]))
+
+    def page(self, path="", **kw):
+        p = loomui.page(self.view(**kw), path)
+        check_page(self, p)
+        return p
+
+    def section(self, p, sid):
+        [s] = [s for s in p["sections"] if s["id"] == sid]
+        return s
+
+    def test_shape(self):
+        p = self.page()
+        self.assertEqual(p["title"], "Bridges")
+        self.assertIn("Robin", p["intro"])
+        self.assertIn("up to 5 at once", p["intro"])
+        self.assertEqual([s["id"] for s in p["sections"]],
+                         ["bridge-chat", "bridge-talk", "conversations", "house-rules", "signin"])
+
+    def test_a_bridge_section(self):
+        chat = self.section(self.page(), "bridge-chat")
+        self.assertEqual(chat["title"], "Chat")
+        stats, now = chat["blocks"][:2]
+        self.assertEqual(stats["items"], [
+            {"label": "State", "value": "running", "detail": "checked 4s ago", "tone": "ok"},
+            {"label": "Bodies", "value": "1/5"},
+            {"label": "Today", "value": "2 turns", "detail": "1 sent"},
+            {"label": "Pickup, 24h", "value": "median 24s", "detail": "max 28s"},
+        ])
+        self.assertEqual(now, {"type": "text",
+                               "text": "Talking now in #general with Pat (active 4s, 2 queued). 1 waiting."})
+        self.assertEqual(len(chat["blocks"]), 2)   # no socket, no note
+
+    def test_socket_rotation_note(self):
+        talk = self.section(self.page(), "bridge-talk")
+        self.assertEqual(talk["blocks"][0]["items"][0]["value"], "socket up")
+        note = talk["blocks"][-1]
+        self.assertEqual(note["tone"], "muted")
+        self.assertEqual(note["text"], "Socket reconnected 3 times in 24h, each back up within 2s; "
+                                       "Talk rotates it every few hours.")
+
+    def test_no_note_when_a_drop_was_an_outage(self):
+        self.events("2026-03", [ev(NOW - 900, "talk", "socket", state="down"),
+                                ev(NOW - 600, "talk", "socket", state="up")])
+        talk = self.section(self.page(), "bridge-talk")
+        self.assertNotIn("muted", [b.get("tone") for b in talk["blocks"]])
+
+    def test_a_dark_bridge_section(self):
+        self.write(snap("talk", NOW - 600, interval=5))
+        talk = self.section(self.page(), "bridge-talk")
+        self.assertEqual(talk["tone"], "bad")
+        self.assertEqual(talk["blocks"][0]["items"][0]["value"], "dark")
+        self.assertTrue(talk["blocks"][1]["text"].startswith("Dark: no snapshot since "))
+
+    def test_conversations_table(self):
+        table = self.section(self.page(), "conversations")["blocks"][0]
+        self.assertEqual(table["columns"], ["Where", "With", "Turns"])
+        self.assertEqual(table["rows"], [["chat · #general", "Pat", "2"],
+                                         ["talk · DM", {"text": "Sam Lee", "page": "loom:people/sam-lee"}, "1"]])
+
+    def test_house_rules(self):
+        rules = self.section(self.page(), "house-rules")
+        self.assertTrue(rules["side"])
+        kv, note = rules["blocks"]
+        self.assertEqual(kv["items"], [{"label": "Guests can't use", "value": "mail, calendar"},
+                                       {"label": "Nobody can use", "value": "handoff"},
+                                       {"label": "Model for new conversations", "value": "model-x"}])
+        self.assertEqual(note["tone"], "muted")
+        self.assertIn("shuttle instance file", note["text"])
+
+    def test_never_prints_content_or_body_ids(self):
+        out = json.dumps(self.page()) + json.dumps(loomui.manifest(self.view()))
+        for secret in ("message content", "secret-body-id", "b1", "b2", "b3"):
+            self.assertNotIn(f'"{secret}"', out)
+            self.assertNotIn(secret + " ", out)
+
+    def test_unknown_path_is_not_found(self):
+        for path in ("nope", "bridge/chat", "x/y"):
+            self.assertEqual(self.page(path), {"title": "Not found", "sections": []})
+
+
+class Window(Fixture):
+    """The last 24h, from this month's file and last month's; nothing older is read."""
+
+    def test_24h_spans_the_month_boundary(self):
+        self.write(snap("chat", NOW - 1))
+        self.events("2026-02", [ev(NOW - DAY_PLUS, "chat", "picked", cid="c-old", venue="#old", who=["Pat"], wait_s=999),
+                                ev(NOW - 20 * 3600, "chat", "picked", cid="c-1", venue="#feb", who=["Pat"], wait_s=10)])
+        self.events("2026-03", [ev(NOW - 3600, "chat", "picked", cid="c-2", venue="#mar", who=["Pat"], wait_s=30),
+                                ev(NOW + 60, "chat", "picked", cid="c-3", venue="#future", who=["Pat"], wait_s=1)])
+        self.events("2026-01", [ev(NOW - 3600, "chat", "picked", cid="c-x", venue="#jan", who=["Pat"], wait_s=5)])
+        p = loomui.page(self.view(), "")
+        rows = [r[0] for r in p["sections"][1]["blocks"][0]["rows"]]
+        self.assertEqual(sorted(rows), ["chat · #feb", "chat · #mar"])
+        stats = p["sections"][0]["blocks"][0]["items"]
+        self.assertEqual(stats[2]["value"], "1 turn")          # today: only March 1st's
+        self.assertEqual(stats[3], {"label": "Pickup, 24h", "value": "median 20s", "detail": "max 30s"})
+
+    def test_mid_month_reads_only_this_month(self):
+        now = time.mktime((2026, 3, 20, 12, 0, 0, 0, 0, -1))
+        self.assertEqual([p.name for p in loomui._month_files(self.dir, now - loomui.DAY, now)],
+                         ["events-2026-03.jsonl"])
+
+    def test_torn_lines_are_skipped(self):
+        self.write(snap("chat", NOW - 1))
+        (self.dir / "events-2026-03.jsonl").write_text(
+            '{"kind": "picked", "t": \n' + json.dumps(ev(NOW - 5, "chat", "picked", venue="#ok", who=[], wait_s=1)) + "\n")
+        p = loomui.page(self.view(), "")
+        self.assertEqual(p["sections"][1]["blocks"][0]["rows"], [["chat · #ok", "nobody named", "1"]])
+
+    def test_empty_window(self):
+        self.write(snap("chat", NOW - 1))
+        p = loomui.page(self.view(), "")
+        stats = p["sections"][0]["blocks"][0]["items"]
+        self.assertEqual(stats[3], {"label": "Pickup, 24h", "value": "none"})
+        self.assertEqual(p["sections"][1]["blocks"][0]["tone"], "muted")
+
+
+DAY_PLUS = loomui.DAY + 60
+
+
+class PeopleLinks(Fixture):
+    """A name links to loom's person page only when its slug is known."""
+
+    def rows(self, recs, people=None):
+        self.write(snap("chat", NOW - 1))
+        if people is not None:
+            self.people.write_text(json.dumps(people))
+        self.events("2026-03", recs)
+        return loomui.page(self.view(), "")["sections"][1]["blocks"][0]["rows"]
+
+    def picked(self, venue, who, **f):
+        return ev(NOW - 100, "chat", "picked", venue=venue, who=who, wait_s=1, **f)
+
+    def test_people_json_name_to_slug(self):
+        rows = self.rows([self.picked("#a", ["Pat Smith"])],
+                         {"people": {"pat-smith": {"name": "Pat Smith", "tier": 2}}})
+        self.assertEqual(rows[0][1], {"text": "Pat Smith", "page": "loom:people/pat-smith"})
+
+    def test_the_events_members_slug(self):
+        rows = self.rows([self.picked("#a", ["Pat"], members=["pat-smith"])])
+        self.assertEqual(rows[0][1], {"text": "Pat", "page": "loom:people/pat-smith"})
+
+    def test_no_slug_is_guessed_from_a_name(self):
+        rows = self.rows([self.picked("#a", ["Pat Smith"])], {"people": {}})
+        self.assertEqual(rows[0][1], "Pat Smith")
+
+    def test_agents_and_shared_names_are_not_linked(self):
+        people = {"people": {"pat-a": {"name": "Pat"}, "pat-b": {"name": "Pat"}},
+                  "agents": {"helper": {"name": "Helper (peer bot)", "kind": "bot"}}}
+        rows = self.rows([self.picked("#a", ["Pat"]), self.picked("#b", ["Helper (peer bot)"])], people)
+        self.assertEqual(sorted(r[1] for r in rows), ["Helper (peer bot)", "Pat"])
+
+    def test_a_group_is_not_linked(self):
+        rows = self.rows([self.picked("chat-group", ["Pat", "Sam"], members=["pat", "sam"])])
+        self.assertEqual(rows[0][:2], ["chat · group DM", "Pat, Sam"])
+
+    def test_a_bad_people_file_links_nothing(self):
+        self.people.write_text("{not json")
+        rows = self.rows([self.picked("#a", ["Pat"])])
+        self.assertEqual(rows[0][1], "Pat")
+
+
+# ---------------------------------------------------------------- the command
+
+
+class Entry(unittest.TestCase):
+    def setUp(self):
+        d = Path(tempfile.mkdtemp(prefix="shuttle-loomui-inst-"))
+        now = d / "now"
+        now.mkdir()
+        (now / "chat.json").write_text(json.dumps(snap("chat", time.time())))
+        (d / "secrets").mkdir()
+        (d / "people.json").write_text(json.dumps({"people": {"pat-smith": {"name": "Pat Smith"}}}))
+        (d / "shuttle.json").write_text(json.dumps({
+            "agent": {"slug": "a", "name": "Robin"}, "now_dir": str(now), "secrets": str(d / "secrets"),
+            "guest_deny": ["mcp__mail"], "always_deny": ["mcp__handoff"], "preferred_model": "model-x"}))
+        self.env = {**os.environ, "SHUTTLE_INSTANCE": str(d / "shuttle.json")}
+
+    def run_tool(self, *args, stdin=None):
+        return subprocess.run([sys.executable, str(ROOT / "tools" / "loom-shuttle"), *args], input=stdin,
+                              capture_output=True, text=True, env=self.env, timeout=10)
+
+    def test_ui_json_is_the_manifest(self):
+        r = self.run_tool("ui", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        m = json.loads(r.stdout)
+        self.assertEqual((m["v"], m["tab"]["label"], m["tile"]["value"]), (2, "Bridges", "1 live"))
+
+    def test_ui_page_json_reads_the_request_on_stdin(self):
+        r = self.run_tool("ui", "page", "--json", stdin=json.dumps({"path": "", "query": {}}))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        p = json.loads(r.stdout)
+        self.assertEqual(p["title"], "Bridges")
+        self.assertIn("Robin", p["intro"])
+        rules = [x for x in p["sections"] if x["id"] != "signin"][-1]
+        self.assertEqual(rules["blocks"][0]["items"][0]["value"], "mail")
+        self.assertEqual(p["sections"][-1]["blocks"][0]["page"], "signin")
+        r = self.run_tool("ui", "page", "--json", stdin=json.dumps({"path": "elsewhere", "query": {}}))
+        self.assertEqual(json.loads(r.stdout), {"title": "Not found", "sections": []})
+
+    def test_no_actions(self):
+        r = self.run_tool("ui", "act", "--json", stdin=json.dumps({"action": "x", "path": "", "fields": {}}))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(json.loads(r.stdout)["ok"])
+
+    def test_anything_but_ui_is_usage(self):
+        self.assertEqual(self.run_tool("frob").returncode, 2)
+        self.assertEqual(self.run_tool("ui", "frob", "--json").returncode, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
