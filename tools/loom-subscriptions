@@ -57,11 +57,19 @@ def manifest(d, now):
             if c.get("status") == "expired":
                 asks.append({"text": f"{sub['label']}: {subs.KINDS[c['kind']]} ({subs.describe(c)}) is expired",
                              "meta": "sign in again", "page": "", "label": "Look"})
-    first = next(iter(sorted(d["subscriptions"].items())), None)
-    detail = f"{first[1]['label']}: {_usage(first[1], now)}" if first else "none yet"
+    # The board's tile: the fullest usage window there is, and when it resets.
+    windows = [(float(sub["usage"][w]), sub["label"], label, sub["usage"].get(f"reset_{w}"))
+               for sub in d["subscriptions"].values() for w, label in (("5h", "5 hours"), ("7d", "7 days"))
+               if (sub.get("usage") or {}).get(w) is not None]
+    if windows:
+        v, who, label, reset = max(windows, key=lambda x: x[0])
+        value, detail = f"{v:.0%}", f"{who} · {label}" + (f", resets {_when(reset)}" if reset else "")
+        tone = "bad" if asks or v >= 0.95 else "warn" if v >= 0.8 else "ok"
+    else:
+        value, detail, tone = f"{len(d['subscriptions'])}", "usage not read yet" if d["subscriptions"] else "none yet", "bad" if asks else "ok"
     return {"v": 2, "tab": {"label": "Subscriptions"},
-            "tile": {"label": "Subscriptions", "value": f"{len(d['subscriptions'])}", "detail": detail[:160],
-                     "tone": "bad" if asks else "ok", "page": ""},
+            "tile": {"label": "Subscriptions", "value": value, "detail": detail[:160],
+                     "tone": tone, "page": ""},
             "asks": asks[:10]}
 
 
