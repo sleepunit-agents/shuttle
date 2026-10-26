@@ -74,6 +74,19 @@ def check_block(t, b):
                     check_str(t, cell["text"]), check_page_link(t, cell["page"])
                 else:
                     check_str(t, cell)
+    elif kind == "status":
+        for i in b["items"]:
+            check_str(t, i["label"]), check_str(t, i.get("text", "")), check_tone(t, i)
+            if "page" in i:
+                check_page_link(t, i["page"])
+    elif kind == "list":
+        t.assertLessEqual(len(b["items"]), 200)
+        for i in b["items"]:
+            check_str(t, i["text"]), check_str(t, i.get("meta", "")), check_tone(t, i)
+            if "avatar" in i:
+                t.assertRegex(i["avatar"], r"^.{1,2}$")
+            if "page" in i:
+                check_page_link(t, i["page"])
     elif kind == "link":
         check_str(t, b["text"])
         if "page" in b:
@@ -208,12 +221,26 @@ class Page(Fixture):
         self.assertIn("Robin", p["intro"])
         self.assertIn("up to 5 at once", p["intro"])
         self.assertEqual([s["id"] for s in p["sections"]],
-                         ["bridge-chat", "bridge-talk", "conversations", "house-rules", "signin"])
+                         ["bridges", "talking", "conversations", "house-rules", "signin"])
 
-    def test_a_bridge_section(self):
-        chat = self.section(self.page(), "bridge-chat")
-        self.assertEqual(chat["title"], "Chat")
-        stats, now = chat["blocks"][:2]
+    def test_one_status_row_a_bridge(self):
+        [status] = self.section(self.page(), "bridges")["blocks"]
+        self.assertEqual(status["items"], [
+            {"label": "Chat", "tone": "ok", "text": "Up · 1 talking", "meta": "4s", "page": "bridge/chat"},
+            {"label": "Talk", "tone": "ok", "text": "Up · 1 turn today", "meta": "2s", "page": "bridge/talk"},
+        ])
+
+    def test_talking_now_and_waiting(self):
+        [lst] = self.section(self.page(), "talking")["blocks"]
+        self.assertEqual(lst["items"], [
+            {"text": "Pat", "meta": "Chat · #general · active 4s, 2 queued", "tone": "ok"},
+            {"text": "Sam", "meta": "Chat · #b · waiting", "tone": "warn"},
+        ])
+
+    def test_a_bridges_own_page(self):
+        p = self.page("bridge/chat")
+        self.assertEqual(p["title"], "Chat")
+        stats, now = p["sections"][0]["blocks"][:2]
         self.assertEqual(stats["items"], [
             {"label": "State", "value": "running", "detail": "checked 4s ago", "tone": "ok"},
             {"label": "Bodies", "value": "1/5"},
@@ -222,10 +249,11 @@ class Page(Fixture):
         ])
         self.assertEqual(now, {"type": "text",
                                "text": "Talking now in #general with Pat (active 4s, 2 queued). 1 waiting."})
-        self.assertEqual(len(chat["blocks"]), 2)   # no socket, no note
+        self.assertEqual(len(p["sections"][0]["blocks"]), 2)   # no socket, no note
+        self.assertEqual([i["text"] for i in p["sections"][1]["blocks"][0]["items"]], ["Pat"], "only its own conversations")
 
     def test_socket_rotation_note(self):
-        talk = self.section(self.page(), "bridge-talk")
+        talk = self.page("bridge/talk")["sections"][0]
         self.assertEqual(talk["blocks"][0]["items"][0]["value"], "socket up")
         note = talk["blocks"][-1]
         self.assertEqual(note["tone"], "muted")
@@ -235,21 +263,26 @@ class Page(Fixture):
     def test_no_note_when_a_drop_was_an_outage(self):
         self.events("2026-03", [ev(NOW - 900, "talk", "socket", state="down"),
                                 ev(NOW - 600, "talk", "socket", state="up")])
-        talk = self.section(self.page(), "bridge-talk")
+        talk = self.page("bridge/talk")["sections"][0]
         self.assertNotIn("muted", [b.get("tone") for b in talk["blocks"]])
 
-    def test_a_dark_bridge_section(self):
+    def test_a_dark_bridge(self):
         self.write(snap("talk", NOW - 600, interval=5))
-        talk = self.section(self.page(), "bridge-talk")
-        self.assertEqual(talk["tone"], "bad")
-        self.assertEqual(talk["blocks"][0]["items"][0]["value"], "dark")
-        self.assertTrue(talk["blocks"][1]["text"].startswith("Dark: no snapshot since "))
+        p = self.page()
+        row = self.section(p, "bridges")["blocks"][0]["items"][1]
+        self.assertEqual((row["tone"], row["text"]), ("bad", "No check in 10m · 1 turn today"))
+        dark = self.section(p, "bridge-talk")
+        self.assertEqual(dark["tone"], "bad")
+        self.assertTrue(dark["blocks"][0]["text"].startswith("Dark: no snapshot since "))
+        self.assertEqual(dark["blocks"][1]["page"], "loom:p/box")
+        self.assertEqual(self.page("bridge/talk")["sections"][0]["blocks"][0]["items"][0]["value"], "dark")
 
-    def test_conversations_table(self):
-        table = self.section(self.page(), "conversations")["blocks"][0]
-        self.assertEqual(table["columns"], ["Where", "With", "Turns"])
-        self.assertEqual(table["rows"], [["chat · #general", "Pat", "2"],
-                                         ["talk · DM", {"text": "Sam Lee", "page": "loom:people/sam-lee"}, "1"]])
+    def test_conversations(self):
+        sec = self.section(self.page(), "conversations")
+        self.assertTrue(sec["side"])
+        self.assertEqual(sec["blocks"][0]["items"], [
+            {"text": "Pat", "meta": "Chat · #general · 2 turns", "avatar": "P"},
+            {"text": "Sam Lee", "meta": "Talk · DM · 1 turn", "avatar": "SL", "page": "loom:people/sam-lee"}])
 
     def test_house_rules(self):
         rules = self.section(self.page(), "house-rules")
@@ -268,7 +301,7 @@ class Page(Fixture):
             self.assertNotIn(secret + " ", out)
 
     def test_unknown_path_is_not_found(self):
-        for path in ("nope", "bridge/chat", "x/y"):
+        for path in ("nope", "bridge/nope", "x/y"):
             self.assertEqual(self.page(path), {"title": "Not found", "sections": []})
 
 
@@ -283,9 +316,9 @@ class Window(Fixture):
                                 ev(NOW + 60, "chat", "picked", cid="c-3", venue="#future", who=["Pat"], wait_s=1)])
         self.events("2026-01", [ev(NOW - 3600, "chat", "picked", cid="c-x", venue="#jan", who=["Pat"], wait_s=5)])
         p = loomui.page(self.view(), "")
-        rows = [r[0] for r in p["sections"][1]["blocks"][0]["rows"]]
-        self.assertEqual(sorted(rows), ["chat · #feb", "chat · #mar"])
-        stats = p["sections"][0]["blocks"][0]["items"]
+        rows = [i["meta"] for s in p["sections"] if s["id"] == "conversations" for i in s["blocks"][0]["items"]]
+        self.assertEqual(sorted(rows), ["Chat · #feb · 1 turn", "Chat · #mar · 1 turn"])
+        stats = loomui.page(self.view(), "bridge/chat")["sections"][0]["blocks"][0]["items"]
         self.assertEqual(stats[2]["value"], "1 turn")          # today: only March 1st's
         self.assertEqual(stats[3], {"label": "Pickup, 24h", "value": "median 20s", "detail": "max 30s"})
 
@@ -298,12 +331,12 @@ class Window(Fixture):
         self.write(snap("chat", NOW - 1))
         (self.dir / "events-2026-03.jsonl").write_text(
             '{"kind": "picked", "t": \n' + json.dumps(ev(NOW - 5, "chat", "picked", venue="#ok", who=[], wait_s=1)) + "\n")
-        p = loomui.page(self.view(), "")
-        self.assertEqual(p["sections"][1]["blocks"][0]["rows"], [["chat · #ok", "nobody named", "1"]])
+        p = loomui.page(self.view(), "bridge/chat")
+        self.assertEqual(p["sections"][1]["blocks"][0]["items"], [{"text": "nobody named", "meta": "Chat · #ok · 1 turn"}])
 
     def test_empty_window(self):
         self.write(snap("chat", NOW - 1))
-        p = loomui.page(self.view(), "")
+        p = loomui.page(self.view(), "bridge/chat")
         stats = p["sections"][0]["blocks"][0]["items"]
         self.assertEqual(stats[3], {"label": "Pickup, 24h", "value": "none"})
         self.assertEqual(p["sections"][1]["blocks"][0]["tone"], "muted")
@@ -320,7 +353,9 @@ class PeopleLinks(Fixture):
         if people is not None:
             self.people.write_text(json.dumps(people))
         self.events("2026-03", recs)
-        return loomui.page(self.view(), "")["sections"][1]["blocks"][0]["rows"]
+        [sec] = [s for s in loomui.page(self.view(), "")["sections"] if s["id"] == "conversations"]
+        return [[i["meta"].rsplit(" · ", 1)[0], {"text": i["text"], "page": i["page"]} if "page" in i else i["text"]]
+                for i in sec["blocks"][0]["items"]]
 
     def picked(self, venue, who, **f):
         return ev(NOW - 100, "chat", "picked", venue=venue, who=who, wait_s=1, **f)
@@ -346,7 +381,7 @@ class PeopleLinks(Fixture):
 
     def test_a_group_is_not_linked(self):
         rows = self.rows([self.picked("chat-group", ["Pat", "Sam"], members=["pat", "sam"])])
-        self.assertEqual(rows[0][:2], ["chat · group DM", "Pat, Sam"])
+        self.assertEqual(rows[0][:2], ["Chat · group DM", "Pat, Sam"])
 
     def test_a_bad_people_file_links_nothing(self):
         self.people.write_text("{not json")

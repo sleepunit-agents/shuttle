@@ -65,49 +65,123 @@ def manifest(d, now):
             "asks": asks[:10]}
 
 
+DAY_S = 86400
+
+
+def _when(t):
+    return time.strftime("%a %-I:%M %p", time.localtime(t))
+
+
+def _meters(d, now):
+    """Usage, the board's way: a meter a window, toned as it fills."""
+    items = []
+    for _, sub in sorted(d["subscriptions"].items()):
+        u = sub.get("usage") or {}
+        for w, label in (("5h", "5 hours"), ("7d", "7 days")):
+            if u.get(w) is None:
+                continue
+            v = max(0.0, min(1.0, float(u[w])))
+            item = {"label": f"{sub['label']} · {label}", "value": v,
+                    "detail": (f"resets {_when(u[f'reset_{w}'])}" if u.get(f"reset_{w}") else "") + f" · read {_ago(u.get('checked'), now)}"}
+            item["detail"] = item["detail"].lstrip(" ·")
+            if v >= 0.95:
+                item["tone"] = "bad"
+            elif v >= 0.8:
+                item["tone"] = "warn"
+            items.append(item)
+    return items
+
+
+def _login(c, now):
+    """(tone, words) for a credential: how long it's good for, or what's wrong."""
+    st = c.get("status", "unknown")
+    exp = c.get("expires")
+    if st == "expired" or (exp and exp <= now):
+        return "bad", "Expired"
+    if st != "valid":
+        return "warn", st.capitalize() + (f" ({c['error'][:40]})" if c.get("error") else "")
+    if exp:
+        days = int((exp - now) // DAY_S)
+        if days < 3:
+            hours = max(1, int((exp - now) // 3600))
+            return "warn", f"Expires in {days} day{'s' if days != 1 else ''}" if days else f"Expires in {hours}h"
+        return "ok", f"Good for {days} days"
+    return "ok", "Valid"
+
+
 def overview(d, now):
     sections = []
-    for name, sub in sorted(d["subscriptions"].items())[:7]:
+    meters = _meters(d, now)
+    sections.append({"id": "usage", "title": "Usage", "blocks": [{"type": "meter", "items": meters[:20]}] if meters
+                     else [{"type": "text", "text": "Not read yet.", "tone": "muted"}]})
+    logins, renew, worst = [], [], "ok"
+    rank = {"ok": 0, "warn": 1, "bad": 2}
+    for name, sub in sorted(d["subscriptions"].items()):
+        mine, renewing = [], False
+        for c in sub["credentials"]:
+            tone, words = _login(c, now)
+            mine.append(tone)
+            # Expired or running out: a check that just couldn't reach the provider isn't a renewal.
+            renewing = renewing or words == "Expired" or words.startswith("Expires")
+            logins.append({"label": f"{sub['label']} · {subs.KINDS[c['kind']]}", "tone": tone, "text": words,
+                           "meta": _ago(c.get("checked"), now).removesuffix(" ago")})
+        harness = "claude" if sub["provider"] == "anthropic" else "codex"
+        if (not mine or renewing) and signin.installed(harness):
+            renew.append({"action": "signin-start", "label": f"Renew {sub['label']} login", "tone": "primary", "fields": {"sub": name}})
+        for t in mine:
+            worst = max(worst, t, key=rank.get)
+    blocks = [{"type": "status", "items": logins[:200]}] if logins else [{"type": "text", "text": "No logins yet: sign one in.", "tone": "muted"}]
+    if renew:
+        blocks.append({"type": "buttons", "items": renew[:6]})
+    login = {"id": "logins", "title": "Logins", "blocks": blocks}
+    if worst != "ok":
+        login["tone"] = worst
+    sections.append(login)
+    runs = {}
+    for agent, order in d["assign"].items():
+        for s_ in order:
+            runs.setdefault(s_, []).append(agent.capitalize())
+    for name, sub in sorted(d["subscriptions"].items())[:5]:
         rows = [[subs.KINDS[c["kind"]], subs.describe(c), c.get("status", "unknown") + (f" ({c['error'][:60]})" if c.get("error") else ""),
                  _ago(c.get("checked"), now), c.get("note", "")[:80]] for c in sub["credentials"]]
-        blocks = [
-            {"type": "kv", "items": [
-                {"label": "Provider", "value": subs.PROVIDERS[sub["provider"]]},
-                {"label": "Plan", "value": sub.get("plan") or "not given"},
-                {"label": "Whose", "value": sub.get("owner") or "not given"},
-                {"label": "Usage", "value": _usage(sub, now)}]},
-            {"type": "table", "columns": ["Credential", "Where", "Status", "Checked", "Note"], "rows": rows} if rows
-            else {"type": "text", "text": "No credentials yet: sign in below.", "tone": "muted"},
-        ]
         buttons = [{"action": "check", "label": "Check now", "fields": {"sub": name}}]
         harness = "claude" if sub["provider"] == "anthropic" else "codex"
         if signin.installed(harness):
             buttons.append({"action": "signin-start", "label": "Sign in a new " + ("long-lived token" if harness == "claude" else "device login"),
-                            "tone": "primary", "fields": {"sub": name}})
+                            "fields": {"sub": name}})
         if sub["provider"] == "anthropic" and signin.installed("claude-broker"):
             buttons.append({"action": "signin-broker", "label": "Sign in a session login for houses (remote-control in a house)", "fields": {"sub": name}})
         if sub["provider"] == "anthropic" and signin.installed("claude-session"):
             buttons.append({"action": "signin-session", "label": "Sign loom's machine in (session login, for remote-control)", "fields": {"sub": name}})
-        blocks.append({"type": "buttons", "items": buttons})
-        sections.append({"id": f"sub-{name}", "title": sub["label"], "blocks": blocks})
+        machine = [{"type": "table", "columns": ["Credential", "Where", "Status", "Checked", "Note"], "rows": rows} if rows
+                   else {"type": "text", "text": "No credentials yet.", "tone": "muted"}, {"type": "buttons", "items": buttons}]
+        sections.append({"id": f"sub-{name}", "title": sub["label"], "blocks": [
+            {"type": "kv", "items": [
+                {"label": "Runs", "value": ", ".join(sorted(runs.get(name, []))) or "nobody yet"},
+                {"label": "Plan", "value": sub.get("plan") or "not given"},
+                {"label": "Provider", "value": subs.PROVIDERS[sub["provider"]]},
+                {"label": "Whose", "value": sub.get("owner") or "not given"}]},
+            {"type": "details", "summary": "Machine details", "meta": f"{len(rows)} credential{'s' if len(rows) != 1 else ''}", "blocks": machine}]})
     agents = sorted(d["assign"].items())
-    sections.append({"id": "who", "title": "Who runs on what", "blocks": [
+    sections.append({"id": "who", "title": "Who runs on what", "side": True, "blocks": [
         {"type": "text", "text": "Each agent's order: its next body runs on the first with a valid credential and room left, so one running out falls to the next.", "tone": "muted"},
         {"type": "table", "columns": ["Agent", "Order"], "rows": [[a, " → ".join(o)] for a, o in agents]} if agents
         else {"type": "text", "text": "No orders yet: an agent uses any subscription of the provider.", "tone": "muted"},
-        {"type": "form", "title": "Set an agent's order", "action": "assign", "submit": "Save", "fields": [
-            {"name": "agent", "label": "Agent", "kind": "text", "required": True},
-            {"name": "order", "label": "Subscriptions, in order", "kind": "text", "required": True, "hint": "names, comma separated"}]},
+        {"type": "details", "summary": "Set an agent's order", "blocks": [
+            {"type": "form", "action": "assign", "submit": "Save", "fields": [
+                {"name": "agent", "label": "Agent", "kind": "text", "required": True},
+                {"name": "order", "label": "Subscriptions, in order", "kind": "text", "required": True, "hint": "names, comma separated"}]}]},
     ]})
-    sections.append({"id": "add", "title": "Add a subscription", "blocks": [
-        {"type": "form", "action": "add", "submit": "Add", "fields": [
-            {"name": "name", "label": "Name", "kind": "text", "required": True, "hint": "lowercase, like home-max"},
-            {"name": "label", "label": "Label", "kind": "text"},
-            {"name": "provider", "label": "Provider", "kind": "choice", "value": "anthropic",
-             "options": [{"value": k, "label": v} for k, v in subs.PROVIDERS.items()]},
-            {"name": "plan", "label": "Plan", "kind": "text", "hint": "Pro, Max, Team…"},
-            {"name": "owner", "label": "Whose", "kind": "text"}]}]})
-    return {"title": "Subscriptions", "intro": "The accounts the agents run on: whose each is, its ways in and whether they work, and how much of it is used.",
+    sections.append({"id": "add", "title": "", "side": True, "blocks": [
+        {"type": "details", "summary": "Add a subscription", "blocks": [
+            {"type": "form", "action": "add", "submit": "Add", "fields": [
+                {"name": "name", "label": "Name", "kind": "text", "required": True, "hint": "lowercase, like home-max"},
+                {"name": "label", "label": "Label", "kind": "text"},
+                {"name": "provider", "label": "Provider", "kind": "choice", "value": "anthropic",
+                 "options": [{"value": k, "label": v} for k, v in subs.PROVIDERS.items()]},
+                {"name": "plan", "label": "Plan", "kind": "text", "hint": "Pro, Max, Team…"},
+                {"name": "owner", "label": "Whose", "kind": "text"}]}]}]})
+    return {"title": "Subscriptions", "intro": "The accounts the agents run on: how much of each is used, whether its logins work, and who runs on it.",
             "sections": sections}
 
 
