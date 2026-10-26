@@ -287,6 +287,39 @@ class Subscriptions(unittest.TestCase):
             self.assertEqual(ua, subs.USER_AGENT)
         self.assertNotIn("Python-urllib", subs.USER_AGENT)
 
+    def test_check_fails_when_a_refresh_fails_so_its_unit_can_alert(self):
+        # 2026-10-26: every refresh failed (Cloudflare 403) for hours and the
+        # check exited 0; its unit's OnFailure= never fired.
+        import io
+        import urllib.error
+        now = int(subs.time.time())
+        login = {"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": (now + 60) * 1000}}
+        store = {"claude-session-main.json": json.dumps(login)}
+        d = subs.load()
+        subs.add_credential(d, "main", "session", secret="claude-session-main.json")["status"] = "valid"
+        subs.save(d)
+
+        def refused(req, timeout):
+            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(b"error code: 1010"))
+        err = io.StringIO()
+        with mock.patch.object(subs, "secret_reader", return_value=store.__getitem__), \
+             mock.patch.object(subs, "store_secret", store.__setitem__), \
+             mock.patch.object(subs.urllib.request, "urlopen", refused), \
+             mock.patch.object(subs, "probe_anthropic", return_value=("valid", {})), \
+             mock.patch("sys.stderr", err), mock.patch("sys.stdout", io.StringIO()):
+            code = subs.main(["check"])
+        self.assertEqual(code, 1)
+        self.assertIn("main: claude-session-main.json couldn't be refreshed (HTTPError)", err.getvalue())
+        # Refreshed fine: back to 0.
+        fresh = {"claudeAiOauth": {"accessToken": "a", "refreshToken": "r", "expiresAt": (now + 86400) * 1000}}
+        store["claude-session-main.json"] = json.dumps(fresh)
+        with mock.patch.object(subs, "secret_reader", return_value=store.__getitem__), \
+             mock.patch.object(subs, "store_secret", store.__setitem__), \
+             mock.patch.object(subs, "probe_anthropic", return_value=("valid", {})), \
+             mock.patch.object(subs, "claude_usage", return_value={"via": "usage endpoint"}), \
+             mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(subs.main(["check"]), 0)
+
     def test_an_agent_is_issued_only_its_own_through_the_api(self):
         from importlib.machinery import SourceFileLoader
         tool = SourceFileLoader("loom_subscriptions_tool", str(ROOT / "tools/loom-subscriptions")).load_module()
