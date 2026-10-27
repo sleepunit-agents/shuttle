@@ -1082,6 +1082,8 @@ def ws_loop():
 # ---------------------------------------------------------------- main loop
 
 FILE_MAX_BYTES = 25 * 1024 * 1024
+FILES_PER_MESSAGE = 5
+FILE_KEEP_DAYS = 30
 FILE_HOSTS = ("files.slack.com",)
 
 
@@ -1128,7 +1130,20 @@ def fetch_file(f, ts):
     with os.fdopen(fd, "wb") as out:
         out.write(data)
     os.replace(tmp, dest)
+    prune_files()
     return dest, None
+
+
+def prune_files(now=None):
+    """Fetched files are kept FILE_KEEP_DAYS, then deleted: a conversation's files, not an archive."""
+    cutoff = (now or time.time()) - FILE_KEEP_DAYS * 86400
+    root = STATE_DIR / "files"
+    for p in root.glob("*/*") if root.exists() else []:
+        try:
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
 
 
 def ingest(state, payload, people):
@@ -1148,7 +1163,15 @@ def ingest(state, payload, people):
     seen.append(ts)
     del seen[:-200]
     text = clean_text(ev.get("text"), people)
-    for f in ev.get("files", []) or []:
+    # Only a known person's files are fetched (a stranger can't fill the disk), and a few a message.
+    known = uid == secret("BOT_USER_ID") or ev.get("bot_id") or people.get(uid)
+    for i, f in enumerate(ev.get("files", []) or []):
+        if not known:
+            text += f" [file: {f.get('name')}: not fetched, the sender isn't someone this bridge knows]"
+            continue
+        if i >= FILES_PER_MESSAGE:
+            text += f" [file: {f.get('name')}: not fetched, more than {FILES_PER_MESSAGE} in one message]"
+            continue
         path, why = fetch_file(f, ts)
         text += f" [file: {f.get('name')} saved at {path}]" if path else f" [file: {f.get('name')}: {why}]"
     if uid == secret("BOT_USER_ID") or ev.get("bot_id"):
