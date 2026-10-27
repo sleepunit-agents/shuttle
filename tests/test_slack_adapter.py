@@ -204,6 +204,24 @@ class SlackAdapter(unittest.TestCase):
         with mock.patch.object(m, "_open_file", lambda req, timeout: Resp(b"<html>", "text/html; charset=utf-8")):
             self.assertIsNone(m.fetch_file(f, "1.4")[0])
         self.assertEqual(len(seen), 1)
+        # Kept 30 days, then deleted.
+        old = time.time() - 31 * 86400
+        os.utime(path, (old, old))
+        m.prune_files()
+        self.assertFalse(path.exists())
+
+    def test_only_a_known_persons_files_are_fetched_and_a_few_a_message(self):
+        from unittest import mock
+        m = self.m
+        fetched = []
+        f = lambda n: {"id": f"F{n}", "name": f"{n}.png", "url_private": f"https://files.slack.com/files-pri/T1-F{n}/{n}.png"}
+        with mock.patch.object(m, "fetch_file", lambda f, ts: (fetched.append(f["name"]), (None, "x"))[1]):
+            ev = {"type": "message", "channel": "D1", "channel_type": "im", "user": "USTRANGER", "ts": "1.1", "text": "hi", "files": [f(1)]}
+            m.ingest({}, {"event": ev}, {})
+            self.assertEqual(fetched, [], "a stranger's file isn't fetched")
+            ev = {**ev, "user": "UKNOWN", "ts": "1.2", "files": [f(n) for n in range(7)]}
+            m.ingest({}, {"event": ev}, {"UKNOWN": ("pat", {"name": "Pat"})})
+            self.assertEqual(fetched, [f"{n}.png" for n in range(m.FILES_PER_MESSAGE)])
 
     def test_import_needs_no_secrets_and_reads_the_instance(self):
         m = self.reload(secrets=False)
