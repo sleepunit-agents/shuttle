@@ -20,6 +20,7 @@ never a value. The instance (for reading a secret to check it) comes from
 $SHUTTLE_INSTANCE.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -284,7 +285,52 @@ def flag(argv, name):
     return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else None
 
 
+def bundle(action, force=False):
+    """This piece's part of loom's household bundle (loom docs/extensions.md, "The bundle: a
+    piece's part"): which subscriptions there are, which agent runs on which, and where each
+    login is. The logins themselves are in the secrets piece's part; a login that's a file on
+    this machine stays behind, and the import names it. Plaintext only on pipes."""
+    age = os.environ.get("LOOM_AGE") or "age"
+    if action == "export":
+        recipients = [r.strip() for r in os.environ.get("LOOM_EXPORT_RECIPIENTS", "").split(",") if r.strip()]
+        if not recipients:
+            print("loom subscriptions: LOOM_EXPORT_RECIPIENTS is empty: a part is never written out in the clear", file=sys.stderr)
+            return 1
+        doc = json.dumps({"format": "loom-subscriptions/1", "subscriptions": subs.load()})
+        r = subprocess.run([age, "-e", "-a", *[x for rc in recipients for x in ("-r", rc)]], input=doc, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"loom subscriptions: age: {r.stderr.strip()[-200:]}", file=sys.stderr)
+            return 1
+        sys.stdout.write(r.stdout)
+        return 0
+    identity = os.environ.get("LOOM_IMPORT_IDENTITY", "")
+    if not identity:
+        print("loom subscriptions: LOOM_IMPORT_IDENTITY names the owner's key file", file=sys.stderr)
+        return 1
+    if subs.path().exists() and not force:
+        print(f"loom subscriptions: {subs.path()} is already here; restore into a fresh household, or pass --force. Nothing was written.", file=sys.stderr)
+        return 1
+    r = subprocess.run([age, "-d", "-i", identity], input=sys.stdin.read(), capture_output=True, text=True)
+    try:
+        doc = json.loads(r.stdout) if r.returncode == 0 else None
+    except ValueError:
+        doc = None
+    d = doc.get("subscriptions") if isinstance(doc, dict) and doc.get("format") == "loom-subscriptions/1" else None
+    if not isinstance(d, dict) or d.get("v") != 1:
+        print("loom subscriptions: the part doesn't decrypt with LOOM_IMPORT_IDENTITY, or isn't this piece's. Nothing was written.", file=sys.stderr)
+        return 1
+    subs.save(d)
+    files = [f"{name}: {subs.describe(c)}" for name, sub in sorted(d.get("subscriptions", {}).items())
+             for c in sub.get("credentials", []) if "file" in (c.get("where") or {})]
+    print(f"restored {len(d.get('subscriptions', {}))} subscription(s) and {len(d.get('assign', {}))} agent order(s)")
+    for f in files:
+        print(f"  a login that's a file on the old machine, not carried: {f} (sign in again here, or copy it)")
+    return 0
+
+
 def main(argv):
+    if argv[:2] == ["bundle", "export"] or argv[:2] == ["bundle", "import"]:
+        return bundle(argv[1], force="--force" in argv[2:])
     d, now = subs.load(), time.time()
     args = [a for a in argv if a != "--json"]
     if args[:1] == ["ui"]:

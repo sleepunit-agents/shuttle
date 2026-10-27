@@ -2,6 +2,8 @@
 account an agent runs on, what each credential's state is, and that only
 names are ever kept."""
 import json
+import shutil
+import re
 import os
 import subprocess
 import sys
@@ -384,6 +386,33 @@ class Subscriptions(unittest.TestCase):
         self.assertTrue(added["ok"])
         self.assertIn("third", subs.load()["subscriptions"])
         self.assertEqual(tool("ui", "page", "--json", stdin=json.dumps({"path": "nope"}))["title"], "Not found")
+
+
+    @unittest.skipUnless(shutil.which("age") and shutil.which("age-keygen"), "needs age")
+    def test_its_part_of_the_household_bundle_round_trips_and_names_the_files_that_stay_behind(self):
+        d = subs.load()
+        subs.add_credential(d, "chatgpt", "device", file="/home/robin/.codex/auth.json")
+        subs.save(d)
+        key = self.home / "owner.key"
+        r = subprocess.run(["age-keygen", "-o", str(key)], capture_output=True, text=True)
+        recipient = re.search(r"age1[0-9a-z]+", r.stderr + r.stdout).group(0)
+
+        def tool(*args, stdin="", **env):
+            return subprocess.run([sys.executable, str(ROOT / "tools/loom-subscriptions"), *args], input=stdin,
+                                  capture_output=True, text=True, env={**os.environ, **env})
+        self.assertNotEqual(tool("bundle", "export", LOOM_EXPORT_RECIPIENTS="").returncode, 0, "never in the clear")
+        part = tool("bundle", "export", LOOM_EXPORT_RECIPIENTS=recipient)
+        self.assertEqual(part.returncode, 0, part.stderr)
+        self.assertTrue(part.stdout.startswith("-----BEGIN AGE ENCRYPTED FILE-----"))
+        self.assertNotIn("claude-main", part.stdout)
+        # Not over a household that already has its own.
+        self.assertNotEqual(tool("bundle", "import", stdin=part.stdout, LOOM_IMPORT_IDENTITY=str(key)).returncode, 0)
+        fresh = self.home / "fresh"
+        r = tool("bundle", "import", stdin=part.stdout, LOOM_IMPORT_IDENTITY=str(key), LOOM_HOME=str(fresh))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads((fresh / "subscriptions.json").read_text())["assign"]["robin"], ["main", "spare"])
+        self.assertEqual(oct((fresh / "subscriptions.json").stat().st_mode & 0o777), "0o600")
+        self.assertIn("/home/robin/.codex/auth.json", r.stdout)
 
 
 class LoginWords(unittest.TestCase):
