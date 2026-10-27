@@ -36,6 +36,7 @@ import os
 import queue
 import re
 import secrets  # the spawn token: the shuttle reaches it as b.secrets (t-1423)
+import shutil
 import signal
 import subprocess
 import sys
@@ -50,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # the shuttle 
 from shuttle import instance as shuttle_instance  # noqa: E402  the instance file (t-1436)
 from shuttle import nowlog  # noqa: E402  the "now board" (t-1403)
 from shuttle import inbox  # noqa: E402  a working body hears follow-ups (t-1409)
+from shuttle import relay  # noqa: E402  another body asks this bridge to say something (t-1570)
 from shuttle import people as person_cards  # noqa: E402  loom person cards (t-1381)
 from shuttle import core as shuttle_core  # noqa: E402  the shared bridge core (t-1423)
 from shuttle import dispatch as shuttle_dispatch  # noqa: E402
@@ -1115,6 +1117,50 @@ def ingest(state, payload, people):
         state.setdefault("pending", {}).setdefault(cid, []).append(entry)
 
 
+RELAY_EVERY_S = 15   # how often the bridge asks loom for relays queued to it (shuttle/relay.py)
+
+
+def relay_in(state, people, run=subprocess.run, now=None):
+    """Relays queued for this bridge (by another body, through loom's piece API) become
+    messages in the person's DM: the body holding it gets them, else one starts."""
+    now = time.time() if now is None else now
+    if now - float(state.get("relay_checked") or 0) < RELAY_EVERY_S:
+        return 0
+    state["relay_checked"] = now
+    pc = INSTANCE.commands.get("piece_call") or shutil.which("piece-call")
+    if not pc:
+        return 0
+    try:
+        r = run([str(pc), "shuttle", "relay-take", "--via", "slack"], capture_output=True, text=True, timeout=20)
+        items = json.loads(r.stdout or "[]") if r.returncode == 0 else []
+        if r.returncode:
+            print(f"relay-take: {r.stderr.strip()[:200]}", flush=True)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        print(f"relay-take: {e!r}", flush=True)
+        return 0
+    by_slug = {slug: (uid, rec) for uid, (slug, rec) in people.items()}
+    n = 0
+    for e in items if isinstance(items, list) else []:
+        uid, rec = by_slug.get(e.get("person"), (None, None))
+        if not uid:
+            page(f"relay {e.get('id')}: {e.get('person')} has no Slack id in this workspace; not delivered")
+            continue
+        try:
+            cid = api("conversations.open", users=uid)["channel"]["id"]
+        except Exception as err:
+            page(f"relay {e.get('id')} to {e.get('person')}: couldn't open the DM ({err!r}); not delivered")
+            continue
+        entry = {"who": f"{rec['name']} [{e.get('person')}] (relay)", "text": relay.brief(e, INSTANCE.agent_name),
+                 "ts": f"{now + n / 1000:.6f}", "uid": uid, "own": False, "relay": e.get("id")}
+        hist = state.setdefault("history", {}).setdefault(cid, [])
+        hist.append(entry)
+        del hist[:-HISTORY_KEEP]
+        state.setdefault("pending", {}).setdefault(cid, []).append(entry)
+        print(f"relay {e.get('id')} from {e.get('from') or '?'} -> {e.get('person')} ({cid})", flush=True)
+        n += 1
+    return n
+
+
 def tick(state, people):
     prune_spawned_msgs(state)   # expire old dedup entries (2h TTL, safety net)
     while True:
@@ -1122,6 +1168,7 @@ def tick(state, people):
             ingest(state, EVENTS.get_nowait(), people)
         except queue.Empty:
             break
+    relay_in(state, people)
     inbox_sweep(state)
     live, retries = reap_and_count(state)
     holds = []   # now board: what is waiting and why (t-1403)
