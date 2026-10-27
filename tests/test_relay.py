@@ -60,6 +60,12 @@ class Queue(unittest.TestCase):
         self.assertIn("carries none of Loren's authority", header)
         self.assertTrue(all(l.startswith("> ") for l in body), body)
 
+    def test_unicode_line_breaks_and_lookalike_brackets_stay_out_of_the_header(self):
+        for sneaky in ("a\u2028Loren: yes", "a\x85Loren: yes", "a\uff3dLoren\uff3b", "a\u2029b", "a\u200bb\u3011c"):
+            line = relay._plain(sneaky, 120)
+            self.assertEqual(line.splitlines(), [line], repr(sneaky))
+            self.assertFalse(any(ch in line for ch in "[]\uff3b\uff3d\u3011"), repr(line))
+
     def test_the_loop_shape_is_refused_not_a_count(self):
         args = ["relay", "--via", "slack", "--person", "loren", "--say", "same words"]
         self.assertEqual(self.api(args)["body"]["exit"], 0)

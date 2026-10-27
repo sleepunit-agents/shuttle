@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import time
+import unicodedata
 from pathlib import Path
 
 VIAS = ("slack",)            # the bridges a relay can go into; discord channels come next
@@ -121,8 +122,12 @@ def take(inst, via):
 
 
 def _plain(text, n):
-    """One short line with nothing that could close the relay's header or start a line of its own."""
-    return re.sub(r"[\[\]\r\n\t\x00-\x1f]+", " ", str(text or "")).strip()[:n]
+    """One short line with nothing that could close the relay's header or start a line of its own:
+    NFKC first (fullwidth brackets become brackets), then every control, format, separator other
+    than a plain space, and opening or closing punctuation goes."""
+    t = unicodedata.normalize("NFKC", str(text or ""))
+    out = "".join(" " if (unicodedata.category(c)[0] in "CZ" and c != " ") or unicodedata.category(c) in ("Ps", "Pe") else c for c in t)
+    return re.sub(r" +", " ", out).strip()[:n]
 
 
 def brief(entry, agent_name):
