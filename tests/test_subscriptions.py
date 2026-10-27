@@ -457,6 +457,40 @@ class Tile(LoginWords):
         self.assertEqual(self.tool.manifest({"subscriptions": {}, "assign": {}}, 1)["tile"]["detail"], "none yet")
 
 
+class Fuel(LoginWords):
+    """Each agent's Fuel on loom's Home: what it runs on now, and how much of the week is left."""
+
+    def d(self):
+        good = [{"kind": "long-lived", "status": "valid", "where": {"secret": "x"}}]
+        return {"subscriptions": {
+            "claude": {"label": "Claude", "credentials": good, "usage": {"5h": 0.03, "7d": 0.42, "reset_7d": 1_000_000_000}},
+            "gpt": {"label": "ChatGPT", "credentials": good, "usage": {}}},
+            "assign": {"ana": ["claude", "gpt"], "bo": ["gpt", "claude"]}}
+
+    def test_fuel_is_the_first_with_room(self):
+        f = self.tool.fuel(self.d())
+        self.assertEqual(f["ana"]["readings"][0]["value"], "Claude: 58% of the week left")
+        self.assertTrue(f["ana"]["readings"][0]["detail"].startswith("5h 3% used · resets "))
+        self.assertEqual(f["ana"]["readings"][0]["tone"], "ok")
+        self.assertNotIn("state", f["ana"])
+        self.assertEqual(f["bo"]["readings"][0]["value"], "ChatGPT: usage not read yet")
+
+    def test_a_full_one_passes_to_the_next_and_none_left_is_unavailable(self):
+        d = self.d()
+        d["subscriptions"]["claude"]["usage"]["7d"] = 0.99
+        self.assertEqual(self.tool.fuel(d)["ana"]["readings"][0]["value"], "ChatGPT: usage not read yet")
+        d["subscriptions"]["gpt"]["usage"] = {"5h": 0.98}
+        ana = self.tool.fuel(d)["ana"]
+        self.assertEqual(ana["state"], "unavailable")
+        self.assertTrue(ana["reason"].startswith("out of fuel: Claude, ChatGPT full until "))
+        for s in d["subscriptions"].values():
+            s["credentials"][0]["status"] = "expired"
+        self.assertEqual(self.tool.fuel(d)["bo"]["reason"], "every login it runs on is expired")
+
+    def test_the_manifest_carries_it(self):
+        self.assertIn("ana", self.tool.manifest(self.d(), 1)["agents"])
+
+
 class ExpiredAsk(LoginWords):
     def test_an_expired_login_asks_with_a_renew_button(self):
         d = {"subscriptions": {"main": {"label": "Main", "provider": "anthropic", "usage": {},

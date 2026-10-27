@@ -76,7 +76,44 @@ def manifest(d, now):
     return {"v": 2, "tab": {"label": "Subscriptions"},
             "tile": {"label": "Subscriptions", "value": value, "detail": detail[:160],
                      "tone": tone, "page": ""},
-            "asks": asks[:10]}
+            "asks": asks[:10],
+            "agents": fuel(d)}
+
+
+def fuel(d):
+    """Each agent's Fuel, for its card on loom's Home (loom's docs/extensions.md, "agents"): the
+    subscription it runs on now (the first in its order with a login that isn't expired and room
+    left), and how much of the week is left there. None with room or a working login: unavailable."""
+    out = {}
+    for agent, order in sorted(d["assign"].items()):
+        subs_ = [(n, d["subscriptions"][n]) for n in order if n in d["subscriptions"]]
+        if not subs_ or not isinstance(agent, str) or not agent[:1].isalpha():
+            continue
+        live = [(n, s) for n, s in subs_ if any(c.get("status") != "expired" for c in s["credentials"])]
+        on = next(((n, s) for n, s in live if subs.has_room(s)), None)
+        if on is None:
+            if not live:
+                out[agent] = {"state": "unavailable", "reason": "every login it runs on is expired",
+                              "readings": [{"label": "Fuel", "value": "no working login", "tone": "bad", "page": ""}]}
+            else:
+                resets = [s["usage"].get(f"reset_{w}") for _, s in live for w in ("5h", "7d") if (s.get("usage") or {}).get(f"reset_{w}")]
+                out[agent] = {"state": "unavailable",
+                              "reason": "out of fuel: " + ", ".join(s["label"] for _, s in live) + " full" + (f" until {_when(min(resets))}" if resets else ""),
+                              "readings": [{"label": "Fuel", "value": "none left", "tone": "bad", "page": ""}]}
+            continue
+        _, sub = on
+        u = sub.get("usage") or {}
+        used = max([float(u[w]) for w in ("5h", "7d") if u.get(w) is not None] or [0.0])
+        if u.get("7d") is not None:
+            value = f"{sub['label']}: {1 - float(u['7d']):.0%} of the week left"
+            detail = (f"5h {float(u['5h']):.0%} used · " if u.get("5h") is not None else "") + (f"resets {_when(u['reset_7d'])}" if u.get("reset_7d") else "")
+        else:
+            value, detail = f"{sub['label']}: usage not read yet", ""
+        r = {"label": "Fuel", "value": value, "tone": "bad" if used >= 0.95 else "warn" if used >= 0.8 else "ok", "page": ""}
+        if detail.strip(" ·"):
+            r["detail"] = detail.strip(" ·")
+        out[agent] = {"readings": [r]}
+    return out
 
 
 DAY_S = 86400
