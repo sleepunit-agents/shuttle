@@ -1081,6 +1081,56 @@ def ws_loop():
 
 # ---------------------------------------------------------------- main loop
 
+FILE_MAX_BYTES = 25 * 1024 * 1024
+FILE_HOSTS = ("files.slack.com",)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The bot's token goes to Slack's file host and nowhere else, so no redirect is followed."""
+
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def _open_file(req, timeout):
+    return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
+
+
+def fetch_file(f, ts):
+    """A file someone shared, saved where this bridge's bodies can read it: (path, None), or (None, why not).
+    Slack's link only opens with the bot's token, which a body never holds, so the bridge fetches it
+    (files:read) into its state, once (25 MB at most)."""
+    url = f.get("url_private_download") or f.get("url_private") or ""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(f.get("name") or "file"))[:80].lstrip("._") or "file"
+    u = urllib.parse.urlparse(url)
+    if u.scheme != "https" or u.hostname not in FILE_HOSTS:
+        return None, "no link to fetch"
+    if int(f.get("size") or 0) > FILE_MAX_BYTES:
+        return None, f"too big to fetch ({int(f['size']) // 1048576} MB)"
+    folder = STATE_DIR / "files" / time.strftime("%Y-%m")
+    fid = re.sub(r"[^A-Za-z0-9]", "", str(f.get("id") or ""))[:20]
+    dest = folder / f"{str(ts).replace('.', '-')}-{fid}-{name}"
+    if dest.exists():
+        return dest, None
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {secret('BOT_TOKEN')}"})
+    try:
+        with _open_file(req, 30) as r:
+            if "text/html" in (r.headers.get("Content-Type") or ""):
+                return None, "Slack sent a page, not the file (the bot may lack files:read)"
+            data = r.read(FILE_MAX_BYTES + 1)
+    except Exception as e:  # noqa: BLE001  a file we can't fetch is said, never fatal
+        return None, f"couldn't fetch it ({type(e).__name__})"
+    if len(data) > FILE_MAX_BYTES:
+        return None, "too big to fetch (over 25 MB)"
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = dest.with_name(dest.name + ".part")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as out:
+        out.write(data)
+    os.replace(tmp, dest)
+    return dest, None
+
+
 def ingest(state, payload, people):
     """Turn an events_api payload into history + pending entries."""
     ev = payload.get("event", {})
@@ -1099,7 +1149,8 @@ def ingest(state, payload, people):
     del seen[:-200]
     text = clean_text(ev.get("text"), people)
     for f in ev.get("files", []) or []:
-        text += f" [file: {f.get('name')} {f.get('url_private', '')}]"
+        path, why = fetch_file(f, ts)
+        text += f" [file: {f.get('name')} saved at {path}]" if path else f" [file: {f.get('name')}: {why}]"
     if uid == secret("BOT_USER_ID") or ev.get("bot_id"):
         who = INSTANCE.agent_name
         entry = {"who": who, "text": text, "ts": ts, "uid": uid, "own": True}

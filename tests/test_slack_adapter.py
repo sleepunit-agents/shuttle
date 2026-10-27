@@ -164,6 +164,47 @@ class SlackAdapter(unittest.TestCase):
         self.assertEqual(self.m.BRIDGE_SEND_ENV["SHUTTLE_BODY"], "bridge")
         self.assertEqual(self.m.BRIDGE_SEND_ENV["CLAUDE_JOB_DIR"], "bridge")
 
+    def test_a_shared_file_is_fetched_with_the_bots_token_and_the_body_gets_a_path(self):
+        # Slack's link needs the bot's token, which a body never holds: the bridge saves the file and says where.
+        import io
+        from unittest import mock
+        m = self.m
+        seen = []
+
+        class Resp(io.BytesIO):
+            def __init__(self, data, ctype):
+                super().__init__(data)
+                self.headers = {"Content-Type": ctype}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def opener(req, timeout):
+            seen.append((req.full_url, req.get_header("Authorization")))
+            return Resp(b"\x89PNG...", "image/png")
+
+        f = {"id": "F0CCPLMP68Z", "name": "../image.png", "size": 7,
+             "url_private": "https://files.slack.com/files-pri/T1-F0CCPLMP68Z/image.png"}
+        with mock.patch.object(m, "_open_file", opener):
+            path, why = m.fetch_file(f, "1793129045.476674")
+            self.assertIsNone(why)
+            self.assertEqual(path.parent.parent, m.STATE_DIR / "files")
+            self.assertEqual(path.name, "1793129045-476674-F0CCPLMP68Z-image.png", "no ../ in the name")
+            self.assertEqual(path.read_bytes(), b"\x89PNG...")
+            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+            self.assertEqual(seen, [(f["url_private"], "Bearer xoxb-t")])
+            self.assertEqual(m.fetch_file(f, "1793129045.476674")[0], path)
+            self.assertEqual(len(seen), 1, "fetched once")
+            # The token goes only to Slack's file host; too big, or a page instead of the file, is said, not saved.
+            self.assertEqual(m.fetch_file({**f, "url_private": "https://evil.example/x.png"}, "1.2"), (None, "no link to fetch"))
+            self.assertEqual(m.fetch_file({**f, "size": 30 * 1048576}, "1.3"), (None, "too big to fetch (30 MB)"))
+        with mock.patch.object(m, "_open_file", lambda req, timeout: Resp(b"<html>", "text/html; charset=utf-8")):
+            self.assertIsNone(m.fetch_file(f, "1.4")[0])
+        self.assertEqual(len(seen), 1)
+
     def test_import_needs_no_secrets_and_reads_the_instance(self):
         m = self.reload(secrets=False)
         self.assertEqual(m.STATE_DIR, self.root / "state" / "kit-slack")
