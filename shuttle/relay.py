@@ -178,7 +178,13 @@ def api_answer(inst, people, request):
             return {"status": 200, "body": {"exit": 0, "stdout": f"{e['id']}: queued for {e['name']} on {e['via']}; "
                                             f"the body in that conversation takes it from here\n", "stderr": ""}}
         if argv[0] == "relay-take":
-            out = take(inst, flags.get("via", ""))
+            # Only that bridge's own house (its token is agent:<a>/<via>) or the owner takes
+            # a queue: every body of the agent shares its role, and one steered into
+            # taking would swallow relays meant for a conversation (t-1591).
+            via = flags.get("via", "")
+            if caller.get("kind") != "owner" and caller.get("service") != via:
+                return refuse(403, f"only the {via} bridge takes the {via} queue")
+            out = take(inst, via)
             return {"status": 200, "body": {"exit": 0, "stdout": json.dumps(out) + "\n", "stderr": ""}}
     except RelayError as e:
         return {"status": 200, "body": {"exit": 1, "stdout": "", "stderr": f"relay: {e}\n"}}
