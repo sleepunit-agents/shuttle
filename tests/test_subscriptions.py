@@ -474,6 +474,7 @@ class Fuel(LoginWords):
         self.assertEqual(f["ana"]["readings"][0]["tone"], "ok")
         self.assertNotIn("state", f["ana"])
         self.assertEqual(f["bo"]["readings"][0]["value"], "ChatGPT: usage not read yet")
+        self.assertNotIn("tone", f["bo"]["readings"][0], "unread usage isn't green")
 
     def test_a_full_one_passes_to_the_next_and_none_left_is_unavailable(self):
         d = self.d()

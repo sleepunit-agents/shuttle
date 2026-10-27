@@ -109,7 +109,9 @@ def fuel(d):
             detail = (f"5h {float(u['5h']):.0%} used · " if u.get("5h") is not None else "") + (f"resets {_when(u['reset_7d'])}" if u.get("reset_7d") else "")
         else:
             value, detail = f"{sub['label']}: usage not read yet", ""
-        r = {"label": "Fuel", "value": value, "tone": "bad" if used >= 0.95 else "warn" if used >= 0.8 else "ok", "page": ""}
+        r = {"label": "Fuel", "value": value, "page": ""}
+        if u.get("5h") is not None or u.get("7d") is not None:  # unread usage isn't good news: no tone
+            r["tone"] = "bad" if used >= 0.95 else "warn" if used >= 0.8 else "ok"
         if detail.strip(" ·"):
             r["detail"] = detail.strip(" ·")
         out[agent] = {"readings": [r]}
