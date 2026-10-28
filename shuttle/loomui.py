@@ -137,8 +137,9 @@ def _people(path):
     """{display name: slug} for people.json's people whose name is theirs alone.
 
     people.json's keys are the slugs loom's person cards use (the bridges ask
-    `loom person show <slug>` with them). Agents aren't loom people, and a name
-    two people share links to neither."""
+    `loom person show <slug>` with them). Its agents are loom entries too (loom's
+    docs/specs/agents-in-people.md), by name and by the label a body sees,
+    "Mark (peer agent bot)". A name two entries share links to neither."""
     try:
         doc = json.loads(Path(path).read_text())
     except (OSError, ValueError, TypeError):
@@ -146,14 +147,17 @@ def _people(path):
     people = doc.get("people") if isinstance(doc, dict) else None
     if not isinstance(people, dict):
         return {}
+    agents = doc.get("agents") if isinstance(doc.get("agents"), dict) else {}
     by_name = {}
-    for slug, rec in people.items():
-        if not isinstance(rec, dict) or slug.startswith("_"):
-            continue
-        name = rec.get("name")
-        if isinstance(name, str) and name:
-            by_name.setdefault(name, []).append(slug)
-    return {name: slugs[0] for name, slugs in by_name.items() if len(slugs) == 1}
+    for group, is_agent in ((people, False), (agents, True)):
+        for slug, rec in group.items():
+            if not isinstance(rec, dict) or slug.startswith("_"):
+                continue
+            name = rec.get("name")
+            if isinstance(name, str) and name:
+                for n in {name, f"{name} ({rec.get('kind') or 'agent'})"} if is_agent else {name}:
+                    by_name.setdefault(n, set()).add(slug)
+    return {name: next(iter(slugs)) for name, slugs in by_name.items() if len(slugs) == 1}
 
 
 def _slug_ok(slug):

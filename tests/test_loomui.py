@@ -381,11 +381,20 @@ class PeopleLinks(Fixture):
         rows = self.rows([self.picked("#a", ["Pat Smith"])], {"people": {}})
         self.assertEqual(rows[0][1], "Pat Smith")
 
-    def test_agents_and_shared_names_are_not_linked(self):
+    def test_shared_names_are_not_linked(self):
         people = {"people": {"pat-a": {"name": "Pat"}, "pat-b": {"name": "Pat"}},
-                  "agents": {"helper": {"name": "Helper (peer bot)", "kind": "bot"}}}
-        rows = self.rows([self.picked("#a", ["Pat"]), self.picked("#b", ["Helper (peer bot)"])], people)
-        self.assertEqual(sorted(r[1] for r in rows), ["Helper (peer bot)", "Pat"])
+                  "agents": {"pat-bot": {"name": "Pat", "kind": "bot"}}}
+        rows = self.rows([self.picked("#a", ["Pat"])], people)
+        self.assertEqual(rows[0][1], "Pat")
+
+    def test_an_agent_links_to_its_entry_by_name_or_by_the_label_a_body_sees(self):
+        # loom's docs/specs/agents-in-people.md: agents are directory entries too.
+        people = {"people": {}, "agents": {"mark": {"name": "Mark", "kind": "peer agent bot"}, "gabe": {"name": "Gabe"}}}
+        rows = self.rows([self.picked("#a", ["Mark (peer agent bot)"]), self.picked("#b", ["Gabe"]),
+                          self.picked("#c", ["Gabe (agent)"])], people)
+        self.assertEqual(sorted((r[1]["text"], r[1]["page"]) for r in rows),
+                         [("Gabe", "loom:people/gabe"), ("Gabe (agent)", "loom:people/gabe"),
+                          ("Mark (peer agent bot)", "loom:people/mark")])
 
     def test_a_group_is_not_linked(self):
         rows = self.rows([self.picked("chat-group", ["Pat", "Sam"], members=["pat", "sam"])])
