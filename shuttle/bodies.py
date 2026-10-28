@@ -32,6 +32,7 @@ COLLECTION = "bodies"
 STALE_S = 90          # a host snapshot older than this: no host (the bridge then can't tell)
 SYNC_S = 2            # the host's pace
 REQ_TTL_S = 300       # a request older than this was given up on by its bridge
+BAD_RESUME_BEATS = 15   # a malformed last report: beats before the host adopts what's running instead
 RESUME_FIND_S = 30    # a launch a restarted host finds in its last report: how long it's looked for
 ENDED_S = 900         # how long an ended body's last entry and sends stay reported (its death is judged on them)
 MAX_TEXT = 4000       # a last entry's text, as reported
@@ -297,6 +298,10 @@ class RemoteRunner(runner_mod.Runner):
             self._give_up(handle)
         return ids
 
+    def undecided(self, handle):
+        snap = self._snap()
+        return snap is not None and handle.get("rid") in (snap.get("starting") or {})
+
     def _give_up(self, handle):
         snap = self._snap()
         if snap is not None and handle.get("rid") not in (snap.get("starting") or {}):
@@ -459,6 +464,7 @@ class Host:
         self.last_busy = self.time.time()
         self.got = {}
         self._resumed = False
+        self._bad_resumes = 0
 
     def _resume(self):
         """A restarted host picks up where its last report left off: the bodies it started are
@@ -472,8 +478,20 @@ class Host:
             return False
         prev = _valid(raw) if raw is not None else {}
         if prev is None:   # there is one and it isn't mine to read: never start over as if I had no bodies
-            print("body host: my last report is malformed; not reporting until it's fixed", flush=True)
-            return False
+            self._bad_resumes += 1
+            if self._bad_resumes < BAD_RESUME_BEATS:
+                print("body host: my last report is malformed; not reporting yet", flush=True)
+                return False
+            # Every body running in this house is the host's own (nothing else starts them here):
+            # adopt them all rather than stall, so none is read as dead.
+            listed = self.runner.list(strict=True)
+            if listed is None:
+                return False
+            print(f"body host: my last report stayed malformed for {BAD_RESUME_BEATS} beats; "
+                  f"adopting the {len(listed)} bodies running here", flush=True)
+            self.mine |= {a.get("id") for a in listed if a.get("id")}
+            self._resumed = True
+            return True
         self.mine |= set(prev.get("bodies") or {})
         self.done = {rid: [str(a) for a in ids] for rid, ids in (prev.get("done") or {}).items()}
         self.mine |= {a for ids in self.done.values() for a in ids}
@@ -603,6 +621,8 @@ class Host:
                 self.runner.stop(aid)
             self._forget(f"req/{rid}")
             return False
+        if rid in self.starting:
+            return False
         try:
             age = self.time.time() - float(r.get("at") or 0)
         except (TypeError, ValueError):
@@ -612,7 +632,7 @@ class Host:
             self.done.pop(rid, None)
             self._forget(f"req/{rid}")
             return False
-        if rid in self.done or rid in self.starting:
+        if rid in self.done:
             return False
         env = {**os.environ, **{k: str(v) for k, v in (r.get("env") or {}).items() if ENV_PASS.match(k)}} \
             if isinstance(r.get("env"), dict) and r["env"] else None
@@ -621,7 +641,7 @@ class Host:
         self.starting[rid] = h
         try:   # on record before the wait, cheaply (no registry read): a crash now finds it, never re-starts it
             if self.last_snap is not None:
-                self.wire.put("host", dict(self.last_snap, at=self.time.time(), starting={
+                self.wire.put("host", dict(self.last_snap, at=self.time.time(), done=dict(self.done), starting={
                     r: {k: v for k, v in hh.items() if k != "before"} for r, hh in self.starting.items()}))
         except Exception:
             pass

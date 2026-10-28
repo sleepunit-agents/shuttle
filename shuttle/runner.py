@@ -94,6 +94,11 @@ class Runner:
         """Seconds since the body last showed any activity (0 if never)."""
         raise NotImplementedError
 
+    def undecided(self, handle):
+        """A launch the harness is still starting, elsewhere (a body host): neither started nor
+        not. The bridge holds it rather than retry it. A local runner always knows: False."""
+        return False
+
     def last_entry(self, aid):
         """The body's last timeline entry, {"state", "detail", "text"}, or None.
         The core reads it to tell a failure ("blocked" with the harness's own

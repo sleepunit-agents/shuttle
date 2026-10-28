@@ -47,12 +47,16 @@ def unclaimed(b, state, plan, batch, attempt, handle):
     rec = {"chan": plan["chan"], "msgs": batch, "attempt": attempt,
            "members": plan.get("members", []), **plan.get("rec", {})}
     label = b.rec_label(rec)
-    if b.agents(strict=True) is not None:
+    starting = b.runner.undecided(handle)
+    if b.agents(strict=True) is not None and not starting:
         print(f"no body for {label}: {NEVER_STARTED}; queued to retry", flush=True)
         state.setdefault("retry_queue", []).append({**rec, "why": NEVER_STARTED})
         return
     keep = {k: v for k, v in handle.items() if k != "before"}   # a set: not JSON, and not needed later
     state.setdefault("unconfirmed", []).append({**rec, "handle": keep, "since": b.time.time()})
+    if starting:   # its body host is still starting it: settled when it's done, never retried meanwhile
+        print(f"no body yet for {label}: still starting in the agent's house; held unconfirmed", flush=True)
+        return
     print(f"no body seen for {label}: the registry can't be read; held unconfirmed", flush=True)
     if not state.get("unconfirmed_paged"):
         state["unconfirmed_paged"] = True

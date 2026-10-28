@@ -539,9 +539,13 @@ def settle_unconfirmed(b, state, retries):
     retried. Either way the batch is no longer left unanswered."""
     held = state.get("unconfirmed") or []
     owned = state.setdefault("owned", {})
+    still = []
     for u in held:
         rec = {k: v for k, v in u.items() if k not in ("handle", "since")}
         ids = b.runner.find(u.get("handle") or {}, set(owned))
+        if not ids and b.runner.undecided(u.get("handle") or {}):
+            still.append(u)   # its body host is still starting it (shuttle/bodies.py)
+            continue
         if len(ids) == 1:
             aid = next(iter(ids))
             owned[aid] = {**rec, "idle_since": 0, "spawned_at": u.get("since", 0)}
@@ -549,8 +553,9 @@ def settle_unconfirmed(b, state, retries):
         else:
             print(f"retrying {b.rec_label(rec)}: {NEVER_STARTED}", flush=True)
             retries.append({**rec, "why": NEVER_STARTED})
-    state["unconfirmed"] = []
-    state.pop("unconfirmed_paged", None)
+    state["unconfirmed"] = still
+    if not still:
+        state.pop("unconfirmed_paged", None)
 
 
 def reap_and_count(b, state):

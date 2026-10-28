@@ -289,6 +289,37 @@ class Bodies(unittest.TestCase):
         self.assertEqual(pending, [], "read, so not handed on")
         self.assertEqual([i["id"] for i in self.inbox.delivered(aid)], ["m1"], "and counted as read")
 
+    def test_a_launch_still_starting_is_held_never_retried(self):
+        from shuttle import core
+        self.beat()
+        h = self.runner.start("brief", "m", [], None, "/w")
+        self.store.put("bodies", "kit/discord-bodies/host",
+                       dict(self.store.get("bodies", "kit/discord-bodies/host")[0], at=self.clock.t,
+                            starting={h["rid"]: {"token": "00000000000000aa"}}))
+        bodies._SNAP.clear()
+        self.assertTrue(self.runner.undecided(h))
+        b = type("B", (), {"runner": self.runner, "rec_label": staticmethod(lambda r: "#room")})()
+        state, retries = {"unconfirmed": [{"chan": "c1", "msgs": [], "handle": h, "since": 1}]}, []
+        core.settle_unconfirmed(b, state, retries)
+        self.assertEqual((retries, len(state["unconfirmed"])), ([], 1), "held, not retried")
+        self.assertNotIn("withdrawn", self.store.get("bodies", f"kit/discord-bodies/req/{h['rid']}")[0])
+
+    def test_a_claim_already_made_stays_published_while_the_next_one_starts(self):
+        self.beat()
+        h1 = self.runner.start("one", "m", [], None, "/w")
+        self.runner.secrets = type("S", (), {"token_hex": staticmethod(lambda n: "fedcba9876543210")})
+        h2 = self.runner.start("two", "m", [], None, "/w")
+        seen = []
+        real = self.harness.claim
+
+        def claim(handle, exclude):
+            seen.append(self.store.get("bodies", "kit/discord-bodies/host")[0].get("done", {}))
+            return real(handle, exclude)
+        self.harness.claim = claim
+        self.beat()
+        firsts = [rid for rid in (h1["rid"], h2["rid"]) if rid in seen[1]]
+        self.assertEqual(len(firsts), 1, "the first claim is published before the second wait")
+
     def test_a_malformed_report_is_cant_tell_not_a_crash(self):
         for bad in ({"at": "soon"}, {"at": 1000, "bodies": []}, {"at": 1000, "bodies": {"x": {"quiet_s": "q"}}},
                     {"at": 1000, "done": {"r": "x"}}, ["not", "a", "dict"], {"at": 1e308},
