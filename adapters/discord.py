@@ -38,6 +38,7 @@ from shuttle import inbox  # noqa: E402  a working body hears follow-ups (t-1409
 from shuttle import people as person_cards  # noqa: E402  loom person cards (t-1381)
 from shuttle import core as shuttle_core  # noqa: E402  the shared bridge core (t-1423)
 from shuttle import upgrade  # noqa: E402  stop when idle and behind, so a fresh house starts on new code
+from shuttle import gates  # noqa: E402  the agent's people, from loom once loom has them
 from shuttle import dispatch as shuttle_dispatch  # noqa: E402
 from shuttle import spawn as shuttle_spawn  # noqa: E402
 from shuttle import selvedge as shuttle_selvedge  # noqa: E402
@@ -169,6 +170,7 @@ GUEST_CAP_NOTE = DISCORD.get("guest_cap_note") or "that's all from me for today.
 # prompt says so. Reloaded every tick; an unreadable file keeps the last good
 # copy.
 PEOPLE_FILE = INSTANCE.dir / "people.json"
+PEOPLE_SRC = gates.People(lambda: PEOPLE_FILE)   # loom's copy when there is one; people.json until then
 WHO = {}      # discord id -> (slug, record), people and peer bots
 PEOPLE = {}   # discord id -> the label a body reads: "Pat", "Kit (peer agent bot)"
 
@@ -203,10 +205,10 @@ def load_who(doc=None, page_if_empty=False):
     global _WHO_PAGED
     if doc is None:
         try:
-            doc = json.loads(PEOPLE_FILE.read_text())
+            doc = PEOPLE_SRC.doc()
         except Exception as e:
             if WHO:
-                print(f"people.json unreadable ({e!r}); keeping who was loaded last", flush=True)
+                print(f"people unreadable ({e!r}); keeping who was loaded last", flush=True)
             else:
                 print(f"people.json unreadable ({e!r}) and nothing loaded yet: "
                       "nobody can wake a body on Discord", flush=True)
