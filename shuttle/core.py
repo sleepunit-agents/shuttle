@@ -149,10 +149,14 @@ def last_timeline(cfg, aid):
 
 
 def _sent_lines(cfg):
+    """The send tool's log: this house's, and (bodies in the agent's house, shuttle/bodies.py)
+    what their host reports of theirs."""
     try:
-        return cfg.sent_log.read_text().splitlines()[-2000:]
+        lines = cfg.sent_log.read_text().splitlines()[-2000:]
     except OSError:
-        return []
+        lines = []
+    remote = getattr(cfg.runner, "sent_lines", None)
+    return lines + (remote() if remote else [])
 
 
 def _posted_by(job, aid):

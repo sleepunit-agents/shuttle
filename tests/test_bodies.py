@@ -96,19 +96,19 @@ class Bodies(unittest.TestCase):
         inbox.configure(inbox_dir=self.dir)
         bodies._SNAP.clear()
         self.harness = Harness()
-        self.bridge_wire = bodies.Wire("discord", call=self.as_agent("kit"))
+        self.bridge_wire = bodies.Wire("discord-bodies", call=self.as_agent("kit", "discord"))
         self.runner = bodies.RemoteRunner(self.bridge_wire, policy=ClaudeRunner.__new__(ClaudeRunner),
                                           time=self.clock, secrets=type("S", (), {"token_hex": staticmethod(lambda n: "0123456789abcdef")}))
         self.inbox = bodies.RemoteInbox(self.bridge_wire, self.runner)
         self.host = self.new_host()
 
     def new_host(self):
-        return bodies.Host(bodies.Wire("discord", call=self.as_agent("kit")), self.harness, inbox=inbox,
-                           cwd="/work", time=self.clock, idle_s=60)
+        return bodies.Host(bodies.Wire("discord-bodies", call=self.as_agent("kit", "discord-bodies")), self.harness, inbox=inbox,
+                           cwd="/work", time=self.clock, idle_s=60, sent_log=self.dir / "sent.log", always_deny=["Bash(rm:*)"])
 
-    def as_agent(self, agent):
+    def as_agent(self, agent, service=None):
         def call(argv):
-            r = bodies.api_answer({"kind": "agent", "agent": agent}, argv, self.store)
+            r = bodies.api_answer({"kind": "agent", "agent": agent, **({"service": service} if service else {})}, argv, self.store)
             if r["status"] != 200:
                 raise OSError(r["body"]["error"])
             return json.loads(r["body"]["stdout"])
@@ -126,10 +126,11 @@ class Bodies(unittest.TestCase):
         self.beat()
         (aid,) = self.runner.find(h, set())
         s = self.harness.started[0]
-        self.assertEqual((s["prompt"], s["model"], s["deny"], s["cwd"]), ("brief\nhello", "model-y", ["WebFetch"], "/work"))
+        self.assertEqual((s["prompt"], s["model"], s["deny"], s["cwd"]), ("brief\nhello", "model-y", ["WebFetch", "Bash(rm:*)"], "/work"),
+                         "the instance's always_deny holds whatever the request says")
         self.assertEqual(s["env"].get("SHUTTLE_SCOPE"), "field")
         self.assertNotIn("SECRET_TOKEN", s["env"], "a credential never rides through the store")
-        self.assertEqual(self.store.docs("bodies", "kit/discord/req/"), [], "the prompt is gone once claimed")
+        self.assertEqual(self.store.docs("bodies", "kit/discord-bodies/req/"), [], "the prompt is gone once claimed")
         self.beat()
         self.assertEqual(self.runner.list(strict=True), [{"id": aid, "status": "busy"}])
         self.assertTrue(self.runner.working("busy"))
@@ -138,13 +139,21 @@ class Bodies(unittest.TestCase):
         self.assertEqual(self.runner.resolve_model(), "model-x")
         self.beat()
         self.assertEqual(len(self.harness.started), 1, "started once")
+        # The body posts from its own house: the bridge's core sees it through the host's report.
+        (self.dir / "sent.log").write_text(f"1001 {aid[:8]} c1 42\n1002 zz99zz99 c9 7\n1003 - c1 5\n")
+        self.beat()
+        self.assertEqual(self.runner.sent_lines(), [f"1001 {aid[:8]} c1 42", "1003 - c1 5"], "only its own bodies' posts")
+        from shuttle import core
+        cfg = type("C", (), {"sent_log": self.dir / "nothing-here.log", "runner": self.runner})()
+        self.assertTrue(core.session_replied(cfg, aid, "c1", 0))
+        self.assertEqual(core.last_post_ts(cfg, aid), 1001.0)
         self.harness.bodies[aid]["done"] = True
         self.beat()
         self.assertTrue(self.runner.done(aid))
         self.runner.stop(aid)
         self.beat()
         self.assertEqual(self.harness.stopped, [aid])
-        self.assertEqual(self.store.docs("bodies", "kit/discord/stop/"), [])
+        self.assertEqual(self.store.docs("bodies", "kit/discord-bodies/stop/"), [])
 
     def test_follow_ups_reach_the_body_once_and_what_it_read_comes_back(self):
         self.beat()
@@ -179,23 +188,35 @@ class Bodies(unittest.TestCase):
         self.clock.t += bodies.REQ_TTL_S + 1
         self.beat()
         self.assertEqual(self.harness.started, [])
-        self.assertEqual(self.store.docs("bodies", "kit/discord/req/"), [])
+        self.assertEqual(self.store.docs("bodies", "kit/discord-bodies/req/"), [])
         # Tried and never showed: the bridge reads that as never started, and the text goes too.
         self.harness.claim = lambda handle, exclude: set()
         h = self.runner.start("brief\nnew words", "m", [], None, "/w")
         self.beat()
         self.assertEqual(self.runner.find(h, set()), set())
-        self.assertEqual(self.store.docs("bodies", "kit/discord/req/"), [])
+        self.assertEqual(self.store.docs("bodies", "kit/discord-bodies/req/"), [])
 
-    def test_each_agent_reaches_only_its_own_keys(self):
-        self.as_agent("kit")(["bodies", "put", "discord/req/0123456789abcdef", "--doc", json.dumps({"prompt": "p"})])
-        self.assertEqual(self.as_agent("pip")(["bodies", "sync", "discord", "--doc", "{}"])["req"], {})
-        for bad in (["bodies", "get", "../kit/discord/host"], ["bodies", "put", "discord/req/nothex", "--doc", "{}"],
-                    ["bodies", "get", "discord/elsewhere"]):
+    def test_each_agent_reaches_only_its_own_keys_and_each_service_only_its_part(self):
+        req = ["bodies", "put", "discord-bodies/req/0123456789abcdef", "--doc", json.dumps({"prompt": "p"})]
+        self.as_agent("kit", "discord")(req)
+        self.assertEqual(self.as_agent("pip", "discord-bodies")(["bodies", "sync", "discord-bodies", "--doc", "{}"])["req"], {},
+                         "another agent never sees it")
+        for bad in (["bodies", "get", "../kit/discord-bodies/host"], ["bodies", "put", "discord-bodies/req/nothex", "--doc", "{}"],
+                    ["bodies", "get", "discord-bodies/elsewhere"], ["bodies", "get", "discord/host"]):
             with self.assertRaises(OSError):
-                self.as_agent("pip")(bad)
+                self.as_agent("pip", "discord")(bad)
+        # Every body in a house carries the house's token: none may ask a house for a body.
+        for service in ("discord-bodies", "slack", "slack-bodies", None):
+            with self.assertRaises(OSError, msg=service):
+                self.as_agent("kit", service)(req)
+        with self.assertRaises(OSError):   # nor stand in for the host
+            self.as_agent("kit", "discord")(["bodies", "sync", "discord-bodies", "--doc", "{}"])
+        with self.assertRaises(OSError):
+            self.as_agent("kit", "discord")(["bodies", "put", "discord-bodies/host", "--doc", "{}"])
+        with self.assertRaises(OSError):   # nor the host write the bridge's asks
+            self.as_agent("kit", "discord-bodies")(["bodies", "put", "discord-bodies/stop/x", "--doc", "{}"])
         for caller in ({"kind": "owner"}, {"kind": "piece"}, {}):
-            self.assertEqual(bodies.api_answer(caller, ["bodies", "get", "discord/host"], self.store)["status"], 403)
+            self.assertEqual(bodies.api_answer(caller, ["bodies", "get", "discord-bodies/host"], self.store)["status"], 403)
         self.assertIsNone(bodies.api_answer({"kind": "agent", "agent": "kit"}, ["people"], self.store))
 
     def test_a_stale_report_is_cant_tell_and_the_host_leaves_when_idle(self):
@@ -230,12 +251,12 @@ class Config(unittest.TestCase):
     def test_runner_host_names_a_host_for_every_bridge_or_one_each(self):
         from shuttle import runner as r
         self.assertIsNone(r.host_profile(self.inst({"kind": "claude"}), "discord"))
-        self.assertEqual(r.host_profile(self.inst({"host": "bodies"}), "slack"), "bodies")
+        self.assertEqual(r.host_profile(self.inst({"host": "slack-bodies"}), "slack"), "slack-bodies")
         each = self.inst({"host": {"discord": "discord-bodies", "slack": "slack-bodies"}})
         self.assertEqual(r.host_profile(each, "slack"), "slack-bodies")
         self.assertIsNone(r.host_profile(each, "teams"), "a bridge it doesn't name runs its own bodies")
         self.assertEqual(r.errors(each), [])
-        for bad in ({"host": "Bad Name"}, {"host": {}}, {"host": {"discord": 3}}):
+        for bad in ({"host": "Bad Name"}, {"host": "bodies"}, {"host": {}}, {"host": {"discord": 3}}):
             self.assertIn("runner.host", r.errors(self.inst(bad))[0])
 
 

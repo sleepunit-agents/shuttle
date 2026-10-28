@@ -32,8 +32,14 @@ STALE_S = 90          # a host snapshot older than this: no host (the bridge the
 SYNC_S = 2            # the host's pace
 REQ_TTL_S = 300       # a request older than this was given up on by its bridge
 MAX_TEXT = 4000       # a last entry's text, as reported
+SENT_LINES = 300      # the tail of the house's sent log, as reported
 SUB = re.compile(r"^[a-z][a-z0-9-]{0,39}/[a-z][a-z0-9-]{0,39}/(host|req/[0-9a-f]{16}|stop/[A-Za-z0-9-]{1,64}|inbox/[A-Za-z0-9-]{1,16})$")
-PROFILE = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+# A host's profile is its service's name, `<bridge service>-bodies`: only that bridge's
+# service asks it for bodies, and only the host's own service reports. Every body in
+# a house carries the house's token, so without this a body could ask another house
+# (with other secrets) to start a body of its choosing.
+PROFILE = re.compile(r"^[a-z][a-z0-9-]{0,32}-bodies$")
+HOST_SUFFIX = "-bodies"
 # Only these may ride along to a body's environment: the launcher's own scope
 # switches (Slack's field scope), never a credential.
 ENV_PASS = re.compile(r"^(SHUTTLE_[A-Z0-9_]+|BRIDGE_[A-Z0-9_]+)$")
@@ -54,13 +60,22 @@ def api_answer(caller, argv, store):
         return {"status": status, "body": {"error": error}}
     if not isinstance(caller, dict) or caller.get("kind") != "agent" or not isinstance(caller.get("agent"), str):
         return refuse(403, "bodies are an agent's own")
-    agent = caller["agent"]
+    agent, service = caller["agent"], caller.get("service")
     op, rest = (argv[1] if len(argv) > 1 else ""), argv[2:]
 
-    def key(sub):
+    def key(sub, write=False):
         k = f"{agent}/{sub}"
         if not SUB.match(k):
             raise ValueError(f"not a bodies key: {sub!r}")
+        profile, kind = sub.split("/")[0], sub.split("/")[1]
+        if not PROFILE.match(profile):
+            raise ValueError(f"not a body host: {profile!r}")
+        bridge = profile[:-len(HOST_SUFFIX)]
+        if service not in (profile, bridge):
+            raise PermissionError(f"only the {bridge} bridge and its {profile} host reach {profile}")
+        # The bridge asks (req, stop, inbox) and the host reports (host); each may drop what it's done with.
+        if write and (service == profile) != (kind == "host") and not (op == "del" and kind in ("req", "stop")):
+            raise PermissionError(f"the {service} service doesn't write {kind}")
         return k
 
     def doc_arg():
@@ -74,23 +89,27 @@ def api_answer(caller, argv, store):
         if op == "get" and len(rest) == 1:
             doc, rev = store.get(COLLECTION, key(rest[0]))
             return out({"doc": doc, "rev": rev})
-        if op == "put":
-            store.put(COLLECTION, key(rest[0]), doc_arg())
+        if op == "put" and rest:
+            store.put(COLLECTION, key(rest[0], write=True), doc_arg())
             return out({"ok": True})
         if op == "del" and len(rest) == 1:
-            store.delete(COLLECTION, key(rest[0]))
+            store.delete(COLLECTION, key(rest[0], write=True))
             return out({"ok": True})
         if op == "sync":
             # The host's one call a beat: its snapshot in, everything waiting for it out.
             profile = rest[0] if rest else ""
             if not PROFILE.match(profile):
                 raise ValueError("bodies sync <profile> --doc JSON")
-            store.put(COLLECTION, key(f"{profile}/host"), doc_arg())
+            if service != profile:
+                raise PermissionError(f"only the {profile} service syncs as {profile}")
+            store.put(COLLECTION, key(f"{profile}/host", write=True), doc_arg())
             got = {}
             for kind in ("req", "stop", "inbox"):
                 pre = f"{agent}/{profile}/{kind}/"
                 got[kind] = {k[len(pre):]: d for k, d in store.docs(COLLECTION, pre)}
             return out(got)
+    except PermissionError as e:
+        return refuse(403, str(e))
     except ValueError as e:
         return refuse(400, str(e))
     return refuse(400, "bodies get|put|del <key>, or bodies sync <profile> --doc JSON")
@@ -249,6 +268,10 @@ class RemoteRunner(runner_mod.Runner):
     def last_entry(self, aid):
         return self._body(aid).get("last") or None
 
+    def sent_lines(self):
+        """What the bodies posted, from the host's sent log: how the core knows a body answered."""
+        return [str(x) for x in (self._snap() or {}).get("sent") or []]
+
 
 # ---------------------------------------------------------------- the bridge's side: the inbox
 
@@ -312,6 +335,10 @@ class RemoteInbox:
 
 # ---------------------------------------------------------------- the host, in the agent's house
 
+def _merge(a, b):
+    return a + [x for x in b if x not in a]
+
+
 class Host:
     """Starts the bodies the bridge asks for with the house's own runner, mirrors their
     inboxes into the house's inbox dir, stops what it's told to, and reports. One sync a beat.
@@ -319,8 +346,11 @@ class Host:
     `runner` is a local runner (runner.ClaudeRunner); `inbox` is shuttle/inbox.py, configured
     to the house's inbox dir. Exits (run() returns) after `idle_s` with no live body and nothing asked."""
 
-    def __init__(self, wire, runner, inbox=local_inbox, cwd=None, time=time, idle_s=600):
+    def __init__(self, wire, runner, inbox=local_inbox, cwd=None, time=time, idle_s=600, sent_log=None,
+                 always_deny=()):
         self.wire, self.runner, self.inbox = wire, runner, inbox
+        self.always_deny = list(always_deny)   # the instance's: every body here loses these, whatever it's asked
+        self.sent_log = sent_log   # where the send tool logs, in this house
         self.cwd = cwd or os.getcwd()
         self.time, self.idle_s = time, idle_s
         self.done = {}            # rid -> [aid]: what the bridge's claim reads
@@ -357,7 +387,18 @@ class Host:
             delivered[a8] = [{"id": it.get("id"), "rt": it.get("rt")} for it in self.inbox.delivered(a8)]
         self.mine &= set(bodies) | {a for ids in self.done.values() for a in ids}
         return {"at": self.time.time(), "model": self.runner.resolve_model(), "bodies": bodies,
-                "delivered": delivered, "done": self.done}
+                "delivered": delivered, "done": self.done, "sent": self._sent()}
+
+    def _sent(self):
+        """The sent log's lines for this host's bodies (and job "-", a send that named none:
+        the core matches those by channel), the last SENT_LINES. "<epoch> <job> <chan> <bytes>": no text."""
+        try:
+            lines = self.sent_log.read_text().splitlines()[-2000:] if self.sent_log else []
+        except OSError:
+            return []
+        mine8 = {a[:8] for a in self.mine}
+        out = [ln for ln in lines if len(ln.split()) >= 3 and (ln.split()[1] == "-" or ln.split()[1][:8] in mine8)]
+        return out[-SENT_LINES:]
 
     def step(self):
         if not self._resumed:
@@ -379,7 +420,8 @@ class Host:
             started = True
             env = {**os.environ, **{k: str(v) for k, v in (r.get("env") or {}).items() if ENV_PASS.match(k)}}
             h = self.runner.start(r["prompt"], r.get("model") or self.runner.resolve_model(),
-                                  [str(x) for x in r.get("deny") or []], env if r.get("env") else None, self.cwd)
+                                  _merge([str(x) for x in r.get("deny") or []], self.always_deny),
+                                  env if r.get("env") else None, self.cwd)
             ids = sorted(self.runner.claim(h, self.mine))
             self.done[rid] = ids
             self.mine |= set(ids)

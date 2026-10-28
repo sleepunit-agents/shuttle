@@ -316,8 +316,8 @@ def errors(instance):
         from shuttle import bodies
         names = list(host.values()) if isinstance(host, dict) else [host]
         if not names or not all(isinstance(n, str) and bodies.PROFILE.match(n) for n in names):
-            return [f"{instance.path}: runner.host is the body host's service name (lowercase), "
-                    f"or {{bridge: name}}, not {host!r}"]
+            return [f"{instance.path}: runner.host is the body host's service name, <bridge service>-bodies "
+                    f"(e.g. discord-bodies), or {{bridge: name}}, not {host!r}"]
     if not isinstance(k, str) or k not in KINDS:
         return [f"{instance.path}: runner.kind {k!r} is not one of: {', '.join(sorted(KINDS))}"]
     if k == "codex":

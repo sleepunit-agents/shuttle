@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The body host: an agent's bodies, started in its own house (shuttle/bodies.py).
 
-    SHUTTLE_INSTANCE=<shuttle.json> python3 adapters/body_host.py <profile> [--idle-s N]
+    SHUTTLE_INSTANCE=<shuttle.json> python3 adapters/body_host.py <profile> --bridge discord [--idle-s N]
 
 Run as a service of the agent's house, with the secrets its bodies may use
 (those the bridge's house had). The bridge, wherever it runs, says what to
@@ -46,6 +46,8 @@ class _Adapter:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("profile")
+    ap.add_argument("--bridge", required=True, help="the bridge whose bodies these are (discord, slack): "
+                    "its send tool's log, in this house, is how the bridge knows a body answered")
     ap.add_argument("--idle-s", type=int, default=0)
     a = ap.parse_args(argv)
     inst = shuttle_instance.load()
@@ -55,7 +57,8 @@ def main(argv=None):
     raw = dict(inst.raw, runner={k: v for k, v in (inst.raw.get("runner") or {}).items() if k != "host"})
     local = shuttle_runner.KINDS[shuttle_runner.kind(inst)](type(inst)(inst.path, raw), b)
     b._runner = local
-    host = bodies.Host(bodies.Wire(a.profile), local, inbox=inbox, cwd=inst.workdir, idle_s=a.idle_s)
+    host = bodies.Host(bodies.Wire(a.profile), local, inbox=inbox, cwd=inst.workdir, idle_s=a.idle_s,
+                       sent_log=inst.state_dir(a.bridge) / "sent.log", always_deny=inst.always_deny)
     print(f"{inst.agent_slug} body host {a.profile} up: idle-s={a.idle_s}", flush=True)
     host.run()
 
