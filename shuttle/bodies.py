@@ -19,6 +19,7 @@ RemoteInbox (shuttle/inbox.py's); the host's is Host. Neither knows the other
 is in another house. Stdlib only.
 """
 import json
+import math
 import os
 import re
 import secrets as _secrets
@@ -31,6 +32,7 @@ COLLECTION = "bodies"
 STALE_S = 90          # a host snapshot older than this: no host (the bridge then can't tell)
 SYNC_S = 2            # the host's pace
 REQ_TTL_S = 300       # a request older than this was given up on by its bridge
+RESUME_FIND_S = 30    # a launch a restarted host finds in its last report: how long it's looked for
 ENDED_S = 900         # how long an ended body's last entry and sends stay reported (its death is judged on them)
 MAX_TEXT = 4000       # a last entry's text, as reported
 SENT_LINES = 300      # the tail of the house's sent log, as reported
@@ -164,20 +166,27 @@ def _api(argv):
 _SNAP = {}   # profile -> (fetched_at, snapshot): the bridge builds a runner per call, the cache outlives it
 
 
-def _valid(snap):
+def _valid(snap, now=None):
     """The host's report, if it has the shape the bridge reads; else None ("can't tell"). Anything
-    in the host's house can write it, so a malformed one must never crash a tick."""
+    in the host's house can write it, so a malformed one must never crash a tick, and one from
+    the future must never read as fresh forever."""
     if not isinstance(snap, dict):
         return None
     try:
-        float(snap.get("at"))
+        at = float(snap.get("at"))
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(at) or (now is not None and at > now + 60):
+        return None
+    if not isinstance(snap.get("starting") or {}, dict):
         return None
     for k in ("bodies", "ended", "done", "delivered", "acked"):
         if not isinstance(snap.get(k, {}), dict):
             return None
     for b in list((snap.get("bodies") or {}).values()) + list((snap.get("ended") or {}).values()):
         if not isinstance(b, dict) or not isinstance(b.get("last") or {}, dict):
+            return None
+        if not all(isinstance(v, str) for v in (b.get("last") or {}).values()):
             return None
         try:
             float(b.get("quiet_s") or 0)
@@ -198,7 +207,7 @@ class RemoteRunner(runner_mod.Runner):
     (list strict -> None), never "every body is gone". A launch the bridge gives up
     on is withdrawn, so the host never starts it late (and stops it if it had)."""
 
-    CLAIM_POLLS = 45   # one a second: the host takes asks one at a time, each up to its own claim
+    CLAIM_POLLS = 30   # one a second: the host takes asks one at a time, each up to its own claim
     REFRESH_S = 1.0
 
     def __init__(self, wire, policy, time=time, secrets=_secrets, model=None):
@@ -213,7 +222,7 @@ class RemoteRunner(runner_mod.Runner):
         at, snap = _SNAP.get(self.wire.profile, (0.0, None))
         if fresh or snap is None or self.time.time() - at >= self.REFRESH_S:
             try:
-                snap = _valid(self.wire.get("host"))
+                snap = _valid(self.wire.get("host"), self.time.time())
             except Exception as e:
                 print(f"body host: can't read its report ({e!r})", flush=True)
                 snap = None
@@ -258,15 +267,17 @@ class RemoteRunner(runner_mod.Runner):
             print(f"body host: couldn't withdraw request {rid} ({e!r})", flush=True)
 
     def _look(self, handle, exclude, fresh=False):
+        """(ids, decided): decided is False while the host is still starting it, or hasn't got to it."""
         rid = handle.get("rid")
-        done = (self._snap(fresh) or {}).get("done") or {}
+        snap = self._snap(fresh) or {}
+        done = snap.get("done") or {}
         ids = {str(a) for a in done.get(rid) or ()} - set(exclude)
         if ids:
             try:   # the request carried the prompt: gone once it's started
                 self.wire.delete(f"req/{rid}")
             except Exception:
                 pass
-        return ids, rid in done
+        return ids, bool(snap) and rid in done and rid not in (snap.get("starting") or {})
 
     def claim(self, handle, exclude):
         for _ in range(self.CLAIM_POLLS):
@@ -274,17 +285,22 @@ class RemoteRunner(runner_mod.Runner):
             ids, _ = self._look(handle, exclude, fresh=True)
             if ids:
                 return ids
-        if self.host_up():   # the host answers and never started it: the bridge retries it, so withdraw it
-            self._withdraw(handle.get("rid"))
+        self._give_up(handle)
         return set()
 
     def find(self, handle, exclude):
         """One look (the bridge settling a launch it couldn't confirm). A miss while the host
-        answers is final: the bridge retries the batch, so the request is withdrawn."""
+        answers is final, unless the host is still starting it: the bridge retries the batch,
+        so the request is withdrawn."""
         ids, _ = self._look(handle, exclude, fresh=True)
-        if not ids and self.host_up():
-            self._withdraw(handle.get("rid"))
+        if not ids:
+            self._give_up(handle)
         return ids
+
+    def _give_up(self, handle):
+        snap = self._snap()
+        if snap is not None and handle.get("rid") not in (snap.get("starting") or {}):
+            self._withdraw(handle.get("rid"))
 
     def list(self, strict=False):
         snap = self._snap()
@@ -376,6 +392,8 @@ class RemoteInbox:
                 self.runner.time.sleep(1)
                 snap = self.runner._snap(fresh=True) or {}
             took = {it.get("id") for it in self.delivered(aid, snap)}
+        if snap:   # what the bridge reads next (delivered) is this final report, not an older one
+            _SNAP[self.runner.wire.profile] = (self.runner.time.time(), snap)
         return [it for it in pending if it.get("id") not in took]
 
     def meta(self, aid):
@@ -436,6 +454,8 @@ class Host:
         self.mirrored = {}        # aid8 -> ids already written to the local pending
         self.acked = {}           # aid8 -> when the house's copy was closed
         self.seen = {}            # aid -> its entry in the last report (an ended body's last word)
+        self.resuming = {}        # rid -> until when a launch found in my last report is looked for
+        self.last_snap = None     # the last report sent: patched cheaply when a launch starts
         self.last_busy = self.time.time()
         self.got = {}
         self._resumed = False
@@ -446,9 +466,13 @@ class Host:
         claiming when it stopped is found, never started again. Until this has read the last
         report (or found there is none), the host doesn't report."""
         try:
-            prev = _valid(self.wire.get("host")) or {}
+            raw = self.wire.get("host")
         except Exception as e:
             print(f"body host: can't read my last report yet ({e!r}); not reporting until I can", flush=True)
+            return False
+        prev = _valid(raw) if raw is not None else {}
+        if prev is None:   # there is one and it isn't mine to read: never start over as if I had no bodies
+            print("body host: my last report is malformed; not reporting until it's fixed", flush=True)
             return False
         self.mine |= set(prev.get("bodies") or {})
         self.done = {rid: [str(a) for a in ids] for rid, ids in (prev.get("done") or {}).items()}
@@ -461,15 +485,29 @@ class Host:
             if rid in self.done or not RID.match(str(rid)) or not isinstance(h, dict) or \
                     not isinstance(h.get("token"), str) or not RID.match(h["token"]):
                 continue
-            try:
-                ids = sorted(self.runner.find({"token": h["token"], "before": []}, self.mine))
-            except Exception as e:
-                print(f"body host: finding launch {rid} again failed ({e!r})", flush=True)
-                continue
-            self.done[rid] = ids if len(ids) == 1 else []
-            self.mine |= set(self.done[rid])
+            # Looked for over a whole claim window (it may not have registered yet), still reported
+            # as starting so the bridge doesn't give up on it meanwhile.
+            self.starting[rid] = {"token": h["token"], "before": []}
+            self.resuming[rid] = self.time.time() + RESUME_FIND_S
         self._resumed = True
         return True
+
+    def _find_resumed(self):
+        """True when a launch was settled (the bridge is waiting on it: report now)."""
+        settled = False
+        for rid, until in list(self.resuming.items()):
+            try:
+                ids = sorted(self.runner.find(self.starting[rid], self.mine))
+            except Exception as e:
+                print(f"body host: finding launch {rid} again failed ({e!r})", flush=True)
+                ids = []
+            if len(ids) == 1 or self.time.time() >= until:
+                self.done[rid] = ids if len(ids) == 1 else []
+                self.mine |= set(self.done[rid])
+                del self.resuming[rid]
+                self.starting.pop(rid, None)
+                settled = True
+        return settled
 
     def _entry(self, aid, status):
         last = self.runner.last_entry(aid)
@@ -520,6 +558,7 @@ class Host:
         snap = self.snapshot()
         if snap is not None:
             self.wire.put("host", snap)
+            self.last_snap = snap
 
     def step(self):
         if not self._resumed and not self._resume():
@@ -529,10 +568,11 @@ class Host:
             print("body host: the registry can't be read; not reporting this beat", flush=True)
             return
         self.got = got = self.wire.sync(snap)
+        self.last_snap = snap
+        started = self._find_resumed()
         reqs = got.get("req") or {}
         # A request the bridge has deleted was claimed: forget its answer.
         self.done = {rid: ids for rid, ids in self.done.items() if rid in reqs}
-        started = False
         for rid, r in reqs.items():
             try:
                 started |= self._take(rid, r)
@@ -572,15 +612,17 @@ class Host:
             self.done.pop(rid, None)
             self._forget(f"req/{rid}")
             return False
-        if rid in self.done:
+        if rid in self.done or rid in self.starting:
             return False
         env = {**os.environ, **{k: str(v) for k, v in (r.get("env") or {}).items() if ENV_PASS.match(k)}} \
             if isinstance(r.get("env"), dict) and r["env"] else None
         h = self.runner.start(r["prompt"], r.get("model") or self.runner.resolve_model(),
                               _merge([str(x) for x in r.get("deny") or []], self.always_deny), env, self.cwd)
         self.starting[rid] = h
-        try:
-            self._report()   # the launch is on record before the wait: a crash now finds it, never re-starts it
+        try:   # on record before the wait, cheaply (no registry read): a crash now finds it, never re-starts it
+            if self.last_snap is not None:
+                self.wire.put("host", dict(self.last_snap, at=self.time.time(), starting={
+                    r: {k: v for k, v in hh.items() if k != "before"} for r, hh in self.starting.items()}))
         except Exception:
             pass
         ids = sorted(self.runner.claim(h, self.mine))

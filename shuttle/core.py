@@ -393,8 +393,10 @@ def drop_inner(b, state, aid, rec, retry, ended):
     The inbox dir is only closed here and queued in state["inbox_gc"]; it is
     removed next tick, after this state (with the leftovers) has been saved."""
     try:
-        delivered = b.inbox.delivered(aid)
+        # Closed first: after close nothing more is handed over, so what's delivered is final
+        # (a body in another house is closed there too before close returns, shuttle/bodies.py).
         pending_ids = {it.get("id") for it in b.inbox.close(aid)}
+        delivered = b.inbox.delivered(aid)
     except Exception as e:   # can't tell what it handled: hand everything on (dupes beat loss)
         print(f"inbox close {aid[:8]}: {e!r}", file=sys.stderr, flush=True)
         delivered, pending_ids = [], {b.msg_key(m) for m in rec.get("handed_msgs", [])}

@@ -63,10 +63,10 @@ class Harness:
         aid = f"ab{self.n:02d}cdef-0000"
         self.bodies[aid] = {"status": "busy", "done": False}
         self.started.append({"prompt": prompt, "model": model, "deny": deny, "env": env, "cwd": cwd})
-        return aid
+        return {"token": f"{self.n:016x}", "aid": aid, "before": set()}
 
     def claim(self, handle, exclude):
-        return {handle} - set(exclude)
+        return {handle["aid"]} - set(exclude)
 
     def find(self, handle, exclude):
         return set()
@@ -244,9 +244,55 @@ class Bodies(unittest.TestCase):
         self.assertIsNotNone(self.runner.last_entry(aid))
         self.assertEqual(self.runner.sent_lines(), [f"1001 {aid[:8]} c1 42"])
 
+    def test_a_restart_mid_launch_finds_it_late_never_starts_it_twice(self):
+        self.beat()
+        h = self.runner.start("brief", "m", [], None, "/w")
+        # The host starts it, records the launch, then dies before it's claimed.
+        real_claim = self.harness.claim
+        self.harness.claim = lambda handle, exclude: (_ for _ in ()).throw(SystemExit("crash"))
+        with self.assertRaises(SystemExit):
+            self.host.step()
+        bodies._SNAP.clear()
+        self.harness.claim = real_claim
+        self.assertIn(h["rid"], self.store.get("bodies", "kit/discord-bodies/host")[0]["starting"])
+        self.assertEqual(self.runner.find(h, set()), set())
+        self.assertNotIn("withdrawn", self.store.get("bodies", f"kit/discord-bodies/req/{h['rid']}")[0] or {},
+                         "the host is still starting it: the bridge doesn't give up")
+        aid = "ab01cdef-0000"
+        found = []
+        self.harness.find = lambda handle, exclude: set(found) - set(exclude)
+        self.host = self.new_host()
+        self.beat()
+        self.assertEqual(len(self.harness.started), 1, "never started twice")
+        found.append(aid)   # it registers late
+        self.beat()
+        self.assertEqual(self.runner.find(h, set()), {aid})
+
+    def test_what_the_body_read_just_before_close_is_neither_lost_nor_handed_on(self):
+        self.beat()
+        h = self.runner.start("brief", "m", [], None, "/w")
+        self.beat()
+        (aid,) = self.runner.find(h, set())
+        self.inbox.open_inbox(aid, "#room", "c1", "discord")
+        self.inbox.put(aid, [{"id": "m1", "text": "x", "msg": {}}])
+        self.beat()
+        self.beat()
+        stale = self.inbox.delivered(aid)
+        inbox.take(aid, now=9)   # the hook reads it after the bridge's last look
+        real_sleep = self.clock.sleep
+        self.clock.sleep = lambda s: (real_sleep(s), self.host.step())   # the host beats while close waits
+        try:
+            pending = self.inbox.close(aid)
+        finally:
+            self.clock.sleep = real_sleep
+        self.assertEqual(stale, [])
+        self.assertEqual(pending, [], "read, so not handed on")
+        self.assertEqual([i["id"] for i in self.inbox.delivered(aid)], ["m1"], "and counted as read")
+
     def test_a_malformed_report_is_cant_tell_not_a_crash(self):
         for bad in ({"at": "soon"}, {"at": 1000, "bodies": []}, {"at": 1000, "bodies": {"x": {"quiet_s": "q"}}},
-                    {"at": 1000, "done": {"r": "x"}}, ["not", "a", "dict"]):
+                    {"at": 1000, "done": {"r": "x"}}, ["not", "a", "dict"], {"at": 1e308},
+                    {"at": 1000, "bodies": {"x": {"last": {"text": 5}}}}, {"at": float("inf")}):
             bodies._SNAP.clear()
             self.store.put("bodies", "kit/discord-bodies/host", bad)
             self.assertIsNone(self.runner.list(strict=True), bad)
