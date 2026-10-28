@@ -67,8 +67,9 @@ def valid(doc):
     """Why a people document isn't one, or None."""
     if not isinstance(doc, dict):
         return "it's a JSON object"
-    if set(doc) - {"people", "agents", "_comment"}:
-        return "it has people, agents and nothing else"
+    # Keys starting with _ are notes (_comment, _updated); anything else is people or agents.
+    if {k for k in doc if not str(k).startswith("_")} - {"people", "agents"}:
+        return "it has people, agents (and _notes) and nothing else"
     for section in ("people", "agents"):
         if section in doc and not isinstance(doc[section], dict):
             return f"{section} maps a slug to an entry"

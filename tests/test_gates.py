@@ -57,6 +57,8 @@ class Api(unittest.TestCase):
         self.assertEqual(self.s.get(gates.PEOPLE, "pip"), (None, 0))
         self.assertEqual(self.s.get(gates.OFFERS, "pip")[0]["doc"], DOC)
         self.assertEqual(self.ask({"kind": "agent", "agent": "pip"}, ["offer-people", "--doc", "{bad"])["status"], 400)
+        # Notes are fine: _comment, _updated.
+        self.assertEqual(self.ask({"kind": "agent", "agent": "pip"}, ["offer-people", "--doc", json.dumps({**DOC, "_updated": "2026-10-28"})])["status"], 200)
         self.assertEqual(self.ask({"kind": "agent", "agent": "pip"}, ["offer-people", "--doc", '{"people": {}, "tier": 3}'])["status"], 400)
 
 
