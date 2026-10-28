@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shuttle import instance, loomui, relay, signin  # noqa: E402
+from shuttle import gates, gates_page, instance, loomui, relay, signin  # noqa: E402
 from shuttle import signin_page as signin_page_mod  # noqa: E402
 import subprocess  # noqa: E402
 
@@ -69,6 +69,9 @@ def act(req):
     # Signing a harness in is the household owner's (loom's docs/specs/owners.md).
     if loomui.owner_agents(req.get("caller")) is not None:
         return {"ok": False, "message": "That's the household owner's to do."}
+    people = gates_page.act(action, fields)
+    if people is not None:
+        return people
     if action == "signin-start":
         return signin_page_mod.start_act(fields.get("harness"))
     if action == "signin-code":
@@ -77,13 +80,31 @@ def act(req):
 
 
 def api(req):
-    """loom's piece API (POST /api/shuttle/run {argv}): relay, and a bridge's relay-take (shuttle/relay.py)."""
+    """loom's piece API (POST /api/shuttle/run {argv}): relay, a bridge's relay-take (shuttle/relay.py),
+    and a bridge's own agent's people: `people`, `offer-people` (shuttle/gates.py)."""
+    argv = ((req.get("body") or {}).get("argv") if isinstance(req, dict) else None) or []
+    if isinstance(argv, list) and argv and argv[0] in ("people", "offer-people"):
+        try:
+            out = gates.api_answer(req.get("caller") or {}, argv)
+        except (OSError, ValueError) as e:
+            return {"status": 503, "body": {"error": f"shuttle's store: {e}"}}
+        return out or {"status": 400, "body": {"error": "argv is: people, or offer-people --doc JSON"}}
     inst = instance.load()
+    return relay.api_answer(inst, _people_of(inst), req)
+
+
+def _people_of(inst):
+    """An agent's people: from shuttle's store in loom once it has them, else its people.json."""
     try:
-        people = json.loads((inst.dir / "people.json").read_text())
+        doc, _rev = gates.get(gates.PEOPLE, inst.agent_slug)
+        if doc is not None:
+            return doc
     except (OSError, ValueError):
-        people = {}
-    return relay.api_answer(inst, people, req)
+        pass
+    try:
+        return json.loads((inst.dir / "people.json").read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 def main(argv):
@@ -111,10 +132,23 @@ def main(argv):
         if path == "signin" or path.startswith("signin/"):
             print(json.dumps(signin_page(path)))
             return 0
+        # Each agent's people document (its gates), a household owner's alone.
+        if path.startswith("people/"):
+            print(json.dumps(gates_page.page(path[len("people/"):]) if own is None else {"title": "Not found", "sections": []}))
+            return 0
         out = loomui.page(loomui.View.of(inst), path, req.get("query"))
         if own is not None:
             # The house rules and signing in are the household owner's.
             out["sections"] = [x for x in out.get("sections", []) if x.get("id") not in ("signin", "house-rules")]
+        elif path == "":
+            try:
+                people = gates_page.section()
+            except (OSError, ValueError) as e:
+                people = {"id": "people", "title": "People and gates", "side": True,
+                          "blocks": [{"type": "text", "tone": "bad", "text": f"loom's store didn't answer: {e}"}]}
+            # Beside the house rules: what gates a body, then what it may do.
+            at = next((i for i, x in enumerate(out["sections"]) if x.get("id") in ("house-rules", "signin")), len(out["sections"]))
+            out["sections"].insert(at, people)
         print(json.dumps(out))
         return 0
     print(json.dumps(loomui.manifest(loomui.View.of(instance.load()))))

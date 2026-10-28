@@ -19,6 +19,14 @@
         "label": "The instance file",
         "hint": "the agent's shuttle.json: its bridges, routes and people. Without it, the Bridges page is empty; subscriptions work regardless"
       }
-    ]
+    ],
+    "store": {
+      "people": {
+        "writers": "owner"
+      },
+      "offers": {
+        "writers": "piece"
+      }
+    }
   }
 }

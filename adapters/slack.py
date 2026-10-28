@@ -55,6 +55,7 @@ from shuttle import relay  # noqa: E402  another body asks this bridge to say so
 from shuttle import people as person_cards  # noqa: E402  loom person cards (t-1381)
 from shuttle import core as shuttle_core  # noqa: E402  the shared bridge core (t-1423)
 from shuttle import upgrade  # noqa: E402  stop when idle and behind, so a fresh house starts on new code
+from shuttle import gates  # noqa: E402  the agent's people, from loom once loom has them
 from shuttle import dispatch as shuttle_dispatch  # noqa: E402
 from shuttle import spawn as shuttle_spawn  # noqa: E402
 from shuttle import selvedge as shuttle_selvedge  # noqa: E402
@@ -75,6 +76,7 @@ inbox.configure(inbox_dir=INSTANCE.inbox_dir)
 # first needed (startup_check() reads it at start), so importing needs no secrets.
 SECRETS = SLACK.get("secrets_env") or "slack.env"   # the secret's name (INSTANCE.read_secret)
 PEOPLE_FILE = INSTANCE.dir / "people.json"
+PEOPLE_SRC = gates.People(lambda: PEOPLE_FILE)   # loom's copy when there is one; people.json until then
 ROUTES_FILE = INSTANCE.dir / "routes.json"
 STATE_DIR = INSTANCE.state_dir("slack")
 STATE_FILE = STATE_DIR / "state.json"
@@ -226,9 +228,9 @@ def react(channel, ts, add=True):
 def load_people():
     """slack user id -> (slug, record) for this workspace."""
     try:
-        d = json.loads(PEOPLE_FILE.read_text())
+        d = PEOPLE_SRC.doc()
     except (OSError, json.JSONDecodeError) as e:
-        print(f"people.json unreadable: {e!r}", flush=True)
+        print(f"people unreadable: {e!r}", flush=True)
         return {}
     return selvedge_index(d, "slack", secret("TEAM_ID"), sections=("people",))   # agents never pass the gate
 
@@ -485,9 +487,9 @@ _NAMES = {"mtime": None, "names": {}}
 def display_name(slug):
     """people.json display name for a slug (the slug itself if unknown)."""
     try:
-        mt = PEOPLE_FILE.stat().st_mtime
+        mt = PEOPLE_SRC.version()
         if mt != _NAMES["mtime"]:
-            d = json.loads(PEOPLE_FILE.read_text()).get("people", {})
+            d = PEOPLE_SRC.doc().get("people", {})
             _NAMES.update(mtime=mt, names={k: v.get("name") for k, v in d.items()})
         return _NAMES["names"].get(slug) or slug
     except Exception:
@@ -1396,7 +1398,7 @@ def main():
     people = {}
     while not STOP.is_set():
         try:
-            mt = PEOPLE_FILE.stat().st_mtime
+            mt = PEOPLE_SRC.version()
             if mt != people_mtime:
                 people = load_people()
                 people_mtime = mt
