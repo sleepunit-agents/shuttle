@@ -1,5 +1,6 @@
-"""The Bridges page's People and routes: each agent's gates and the household's
-route map, kept in loom (shuttle/gates.py).
+"""Each agent's people and channels, kept in loom (shuttle/gates.py), shown on
+that agent's own page: who each id is and what they may ask of it; where it
+answers without a mention, and where it never answers.
 
 Each bridge still reads these from files beside it (people.json, routes.json)
 until a household owner moves them into loom: the bridge offers its file, the
@@ -34,48 +35,6 @@ def _note(doc):
     """A document's own `_updated` note, shortened: how a person tells two copies apart."""
     u = (doc or {}).get("_updated")
     return _cut(u, 160) if isinstance(u, str) and u else ""
-
-
-# ---------------------------------------------------------------- the section on the Bridges page
-
-def section(get=gates.get, keys=gates.list_keys):
-    """People and routes on the Bridges page: one row each, saying what's left to do."""
-    agents = sorted(set(keys(gates.PEOPLE)) | set(keys(gates.OFFERS)))
-    items, todo = [], 0
-    for a in agents:
-        doc, rev = get(gates.PEOPLE, a)
-        offer, _ = get(gates.OFFERS, a)
-        if doc is not None:
-            p, g = _count(doc)
-            items.append({"text": f"{a}'s people", "meta": f"in loom · {p} people, {g} agents", "page": f"people/{a}"})
-        elif offer is not None:
-            todo += 1
-            p, g = _count(offer.get("doc"))
-            # An offer is the bridge's own words: it opens for review, never a one-tap accept.
-            items.append({"text": f"{a}'s people", "meta": f"to review · {p} people, {g} agents, from its people.json",
-                          "tone": "warn", "page": f"offer/{a}"})
-    routes, _ = get(gates.ROUTES, gates.HOUSEHOLD)
-    if routes is not None:
-        items.append({"text": "The household's routes", "meta": f"in loom · {len(routes.get('channels') or {})} channels",
-                      "page": "routes"})
-    else:
-        for a in sorted(keys(gates.ROUTE_OFFERS)):
-            todo += 1
-            offer, _ = get(gates.ROUTE_OFFERS, a)
-            doc = (offer or {}).get("doc") or {}
-            note = _note(doc)
-            items.append({"text": f"The household's routes, as {a}'s bridge has them",
-                          "meta": f"to review · {len(doc.get('channels') or {})} channels" + (f" · updated {note}" if note else ""),
-                          "tone": "warn", "page": f"routes-offer/{a}"})
-    blocks = []
-    if todo:
-        blocks.append({"type": "text", "text": (
-            "The bridges still read who's who, and which agent answers in which channel, from files beside them. "
-            "Open each one marked to review, check it, and press the button at the bottom: it moves into loom as it is. "
-            "Nothing changes for anyone when you do; it's the same data, kept in loom from then on.")})
-    blocks.append({"type": "list", "items": items} if items else
-                  {"type": "text", "tone": "muted", "text": "Nothing to review: no bridge has offered its files yet."})
-    return {"id": "people", "title": "People and routes", "side": True, "blocks": blocks}
 
 
 # ---------------------------------------------------------------- reading a people document
@@ -128,21 +87,111 @@ def people_blocks(doc):
     return blocks
 
 
-def page(agent, get=gates.get):
+# ---------------------------------------------------------------- reading a route map
+
+# ---------------------------------------------------------------- an agent's channels
+
+def _sources(agent, get, keys):
+    """{bridge agent: (its offer rev, `agent`'s part per that bridge's routes.json)} for every bridge
+    whose file says something about `agent`."""
+    out = {}
+    for b in sorted(keys(gates.ROUTE_OFFERS)):
+        offer, rev = get(gates.ROUTE_OFFERS, b)
+        if offer and isinstance(offer.get("doc"), dict):
+            household, parts = gates.split(offer["doc"], b)
+            if agent in parts:
+                out[b] = (rev, parts[agent], household, offer["doc"])
+    return out
+
+
+def _source_for(agent, sources):
+    """Whose copy to show for `agent`: its own bridge's, else the copy that knows its bot."""
+    if agent in sources:
+        return agent
+    with_bot = [b for b, v in sources.items() if v[1].get("bot")]
+    return (with_bot or sorted(sources) or [None])[0]
+
+
+def channel_blocks(agent, part, names=None):
+    names = names or {}
+    part = part or {}
+    rows = [["#" + _cut(n or cid), cid] for cid, n in sorted((part.get("answers") or {}).items(), key=lambda kv: str(kv[1]))][:ROWS]
+    blocks = [{"type": "table", "columns": ["Answers here without a mention", "Id"], "rows": rows} if rows else
+              {"type": "text", "tone": "muted", "text": f"{agent} answers nowhere without a mention: only when someone mentions it."}]
+    never = (part.get("extra") or {}).get("ignore") or {}
+    kv = [{"label": "Its bot", "value": str(part.get("bot") or "—")},
+          {"label": "Its alerts go to", "value": "#" + str(names.get(part.get("notify")) or part.get("notify")) if part.get("notify") else "—"}]
+    if never:
+        kv.append({"label": "Never answers in", "value": _cut(", ".join("#" + str(names.get(c) or c) for c in never))})
+    blocks.append({"type": "kv", "items": kv})
+    return blocks
+
+
+def _differences(agent, shown_by, sources):
+    """How other bridges' copies differ from the one shown, about this agent's channels."""
+    _, mine, _, _ = sources[shown_by]
+    bits = []
+    for b, (_, theirs, household, _) in sources.items():
+        if b == shown_by:
+            continue
+        names = household.get("channel_names") or {}
+        a, t = set(mine.get("answers") or {}), set(theirs.get("answers") or {})
+        if t - a:
+            bits.append(f"{b}'s copy also has {agent} answering in " + ", ".join("#" + str(names.get(c) or c) for c in sorted(t - a)))
+        if a - t:
+            bits.append(f"{b}'s copy doesn't have {agent} in " + ", ".join("#" + str((mine.get("answers") or {}).get(c) or c) for c in sorted(a - t)))
+        if (theirs.get("bot") or None) != (mine.get("bot") or None):
+            bits.append(f"{b}'s copy has {'a different bot' if theirs.get('bot') else 'no bot'} for {agent}")
+    return bits
+
+
+def _conflicts(agent, part, get, keys):
+    """Channels where `part` answers and another agent's saved part does too."""
+    out = []
+    for other in keys(gates.CHANNELS):
+        if other == agent:
+            continue
+        theirs, _ = get(gates.CHANNELS, other)
+        both = set((part or {}).get("answers") or {}) & set((theirs or {}).get("answers") or {})
+        out += [(cid, other) for cid in sorted(both)]
+    return out
+
+
+# ---------------------------------------------------------------- the agent's section and its pages
+
+def agent_section(agent, get=gates.get, keys=gates.list_keys):
+    """`agent`'s people and channels: one row each, with what's left to do."""
+    if not AGENT.match(agent or ""):
+        return None
+    items = []
+    doc, _ = get(gates.PEOPLE, agent)
+    offer, _ = get(gates.OFFERS, agent)
+    if doc is not None:
+        p, g = _count(doc)
+        items.append({"text": "People", "meta": f"{p} people, {g} agents", "page": f"people/{agent}"})
+    elif offer is not None:
+        p, g = _count(offer.get("doc"))
+        items.append({"text": "People", "meta": f"to check · {p} people, {g} agents, from its bridge's file",
+                      "tone": "warn", "page": f"people/{agent}"})
+    part, _ = get(gates.CHANNELS, agent)
+    if part is not None:
+        items.append({"text": "Channels", "meta": f"answers in {len(part.get('answers') or {})} without a mention",
+                      "page": f"channels/{agent}"})
+    elif _sources(agent, get, keys):
+        items.append({"text": "Channels", "meta": "to check · from its bridge's file", "tone": "warn", "page": f"channels/{agent}"})
+    if not items:
+        return None
+    return {"id": f"people-{agent}", "title": "People and channels", "side": True, "blocks": [{"type": "list", "items": items}]}
+
+
+def people_page(agent, get=gates.get):
     if not AGENT.match(agent or ""):
         return {"title": "Not found", "sections": []}
     doc, _ = get(gates.PEOPLE, agent)
-    if doc is None:
-        return {"title": "Not found", "sections": []}
-    return {"title": f"{agent}'s people", "intro": f"Who each Slack and Discord id is, and what they may ask {agent} for. "
-            "Tier 3 is you; 2 is trusted; 1 is a guest, only in the places listed. In loom: changing one here comes next.",
-            "sections": [{"id": "doc", "blocks": people_blocks(doc)}]}
-
-
-def offer_page(agent, get=gates.get):
-    """An agent's bridge's offered people.json, as tables, with one button that saves exactly this."""
-    if not AGENT.match(agent or ""):
-        return {"title": "Not found", "sections": []}
+    if doc is not None:
+        return {"title": f"{agent}'s people", "intro": f"Who each Slack and Discord id is, and what they may ask {agent} for. "
+                "Tier 3 is you; 2 is trusted; 1 is a guest, only in the places listed. Changing one here comes next.",
+                "sections": [{"id": "doc", "blocks": people_blocks(doc)}]}
     offer, rev = get(gates.OFFERS, agent)
     if not offer or gates.valid(offer.get("doc")):
         return {"title": "Not found", "sections": []}
@@ -151,99 +200,88 @@ def offer_page(agent, get=gates.get):
                    "note": "Saves exactly what's above into loom. Nothing changes for anyone: the bridge reads the same "
                            "people from loom instead of its file.",
                    "hidden": {"agent": agent, "offer_rev": str(rev)}})
-    return {"title": f"{agent}'s people, to review",
-            "intro": f"{agent}'s bridge still reads who's who from its people.json. This is that file. "
+    return {"title": f"{agent}'s people, to check",
+            "intro": f"{agent}'s bridge still reads who's who from a file. This is that file. "
                      "Look it over, especially tier 3, and if it's right, use it.",
             "sections": [{"id": "offer", "blocks": blocks}]}
 
 
-# ---------------------------------------------------------------- reading a route map
-
-def _names(doc):
-    """channel id -> its name, from the map itself."""
-    return {cid: (e.get("name") if isinstance(e, dict) else None) for cid, e in ((doc or {}).get("channels") or {}).items()}
-
-
-def routes_blocks(doc, other=None, other_name=None):
-    doc = doc or {}
-    channels = {k: v for k, v in (doc.get("channels") or {}).items() if isinstance(v, dict)}
-    blocks = []
-    if other is not None:
-        a, b = channels, {k: v for k, v in ((other or {}).get("channels") or {}).items() if isinstance(v, dict)}
-        only_here = sorted(set(a) - set(b))
-        only_there = sorted(set(b) - set(a))
-        moved = sorted(k for k in set(a) & set(b) if a[k].get("primary") != b[k].get("primary"))
-        ign_a, ign_b = set(doc.get("ignore") or {}), set((other or {}).get("ignore") or {})
-        if only_here or only_there or moved or ign_a != ign_b:
-            def label(ids, src):
-                return ", ".join("#" + str(src[k].get("name") or k) for k in ids[:12]) + ("…" if len(ids) > 12 else "")
-            bits = []
-            if only_here:
-                bits.append(f"only here: {label(only_here, a)}")
-            if only_there:
-                bits.append(f"only in {other_name}'s: {label(only_there, b)}")
-            if moved:
-                bits.append(f"a different primary in {other_name}'s: {label(moved, a)}")
-            if ign_b - ign_a:
-                bits.append(f"{other_name}'s also never answers in {len(ign_b - ign_a)} more channel(s): "
-                            f"{', '.join(sorted(ign_b - ign_a))[:300]}")
-            if ign_a - ign_b:
-                bits.append(f"this one never answers in {len(ign_a - ign_b)} channel(s) {other_name}'s does: "
-                            f"{', '.join(sorted(ign_a - ign_b))[:300]}")
-            blocks.append({"type": "callout", "tone": "warn", "title": f"Not the same as {other_name}'s copy",
-                           "text": _cut("; ".join(bits), 1800) + ". Whichever you use becomes the one every bridge reads."})
-        else:
-            blocks.append({"type": "callout", "title": f"Same as {other_name}'s copy",
-                           "text": "Every channel and primary agent matches. Either one is fine."})
-    note = _note(doc)
-    if note:
-        blocks.append({"type": "kv", "items": [{"label": "Last updated", "value": note}]})
-    rows = [["#" + _cut(e.get("name") or cid), e.get("primary") or "nobody (mentions only)", cid]
-            for cid, e in sorted(channels.items(), key=lambda kv: str(kv[1].get("name") or kv[0]))[:ROWS]]
-    blocks.append({"type": "table", "columns": ["Channel", "Answers without a mention", "Id"], "rows": rows})
-    bots = doc.get("bots") or {}
-    names = _names(doc)
-    ignore = doc.get("ignore") or {}
-    kv = [{"label": "Bots", "value": _cut(", ".join(sorted(bots))) or "—"},
-          {"label": "Never answers in", "value": _cut(", ".join("#" + str(names.get(c) or c) for c in ignore)) or "—"}]
-    blocks.append({"type": "kv", "items": kv})
-    return blocks
-
-
-def routes_page(get=gates.get):
-    doc, _ = get(gates.ROUTES, gates.HOUSEHOLD)
-    if doc is None:
-        return {"title": "Not found", "sections": []}
-    return {"title": "The household's routes", "intro": "Which agent answers in each channel when nobody's mentioned. "
-            "A mention always reaches the agent mentioned. Every agent's bridge reads this. In loom: changing it here comes next.",
-            "sections": [{"id": "doc", "blocks": routes_blocks(doc)}]}
-
-
-def routes_offer_page(agent, get=gates.get, keys=gates.list_keys):
+def channels_page(agent, get=gates.get, keys=gates.list_keys):
     if not AGENT.match(agent or ""):
         return {"title": "Not found", "sections": []}
-    offer, rev = get(gates.ROUTE_OFFERS, agent)
-    if not offer or not isinstance(offer.get("doc"), dict):
+    household, _ = get(gates.ROUTES, gates.HOUSEHOLD)
+    names = (household or {}).get("channel_names") or {}
+    part, _ = get(gates.CHANNELS, agent)
+    if part is not None:
+        blocks = channel_blocks(agent, part, names)
+        for cid, other in _conflicts(agent, part, get, keys):
+            blocks.insert(0, {"type": "callout", "tone": "warn", "title": "Two agents answer here",
+                              "text": f"#{names.get(cid) or cid}: {agent} and {other} both answer without a mention, so "
+                                      "neither does until one stops: a mention decides."})
+        return {"title": f"{agent}'s channels", "intro": f"Where {agent} answers in Discord when nobody's mentioned. "
+                "A mention always reaches the agent mentioned. Changing these here comes next.",
+                "sections": [{"id": "doc", "blocks": blocks}]}
+    sources = _sources(agent, get, keys)
+    shown_by = _source_for(agent, sources)
+    if shown_by is None:
         return {"title": "Not found", "sections": []}
-    others = [a for a in sorted(keys(gates.ROUTE_OFFERS)) if a != agent]
-    other = (get(gates.ROUTE_OFFERS, others[0])[0] or {}).get("doc") if others else None
-    blocks = routes_blocks(offer["doc"], other, others[0] if others else None)
-    blocks.append({"type": "form", "action": "routes-accept", "submit": "Use this as the household's routes", "fields": [],
-                   "note": "Saves exactly what's above into loom, for every agent's bridge. Nothing changes in the channels "
-                           "that match what each bridge has now.",
-                   "hidden": {"agent": agent, "offer_rev": str(rev)}})
-    return {"title": f"Routes, as {agent}'s bridge has them",
-            "intro": f"Which agent answers in each Discord channel when nobody's mentioned. Each bridge kept its own copy "
-                     f"of this file; this is {agent}'s. One copy goes into loom and every bridge reads it from then on.",
+    rev, mine, hh, _ = sources[shown_by]
+    blocks = []
+    diffs = _differences(agent, shown_by, sources)
+    if diffs:
+        blocks.append({"type": "callout", "tone": "warn", "title": "The bridges' copies differ",
+                       "text": _cut("; ".join(diffs), 1800) + f". This shows {shown_by}'s copy; using it settles it."})
+    for cid, other in _conflicts(agent, mine, get, keys):
+        blocks.append({"type": "callout", "tone": "warn", "title": "Two agents would answer here",
+                       "text": f"#{(mine.get('answers') or {}).get(cid) or cid}: {other} already answers there without a mention."})
+    blocks += channel_blocks(agent, mine, hh.get("channel_names") or {})
+    note = _note(sources[shown_by][3])
+    if note:
+        blocks.append({"type": "kv", "items": [{"label": f"{shown_by}'s copy last updated", "value": note}]})
+    first = household is None
+    blocks.append({"type": "form", "action": "channels-accept", "submit": f"Use these as {agent}'s channels", "fields": [],
+                   "note": "Saves exactly what's above into loom" + (
+                       ", with the household's part of the same file (the Discord server, channel names, webhook peers)"
+                       if first else "") + ". The bridges keep reading their files until every agent's channels are in loom, "
+                       "then switch with nothing changing.",
+                   "hidden": {"agent": agent, "from": shown_by, "offer_rev": str(rev)}})
+    return {"title": f"{agent}'s channels, to check",
+            "intro": f"Where {agent} answers in Discord when nobody's mentioned, as {shown_by}'s bridge has it in its file. "
+                     "If it's right, use it.",
             "sections": [{"id": "offer", "blocks": blocks}]}
+
+
+def asks(get=gates.get, keys=gates.list_keys):
+    """What's waiting for a household owner: offers to check, and channels two agents claim.
+    Never tagged with an agent: loom shows an agent owner the asks tagged with their agents, and
+    these are the household owner's alone (the pages refuse anyone else)."""
+    out = []
+    for a in sorted(set(keys(gates.OFFERS)) - set(keys(gates.PEOPLE))):
+        out.append({"text": f"Check {a}'s people", "meta": "its bridge still reads who's who from a file",
+                    "page": f"people/{a}", "label": "Check"})
+    saved = set(keys(gates.CHANNELS))
+    wanted = set()
+    for b in keys(gates.ROUTE_OFFERS):
+        offer, _ = get(gates.ROUTE_OFFERS, b)
+        if offer and isinstance(offer.get("doc"), dict):
+            wanted |= set(gates.split(offer["doc"], b)[1])
+    for a in sorted(wanted - saved):
+        out.append({"text": f"Check {a}'s channels", "meta": "where it answers without a mention, still in a bridge's file",
+                    "page": f"channels/{a}", "label": "Check"})
+    parts = {a: get(gates.CHANNELS, a)[0] for a in saved}
+    for cid, who in sorted(gates.claims({a: p for a, p in parts.items() if isinstance(p, dict)}).items()):
+        if len(who) > 1:
+            out.append({"text": f"{' and '.join(who)} both answer in a channel without a mention",
+                        "meta": "neither does until one stops", "page": f"channels/{who[0]}", "label": "Look"})
+    return out
 
 
 # ---------------------------------------------------------------- the actions
 
-def act(action, fields, get=gates.get, put=gates.put):
-    """Use an offer as it was shown. None for an action that isn't People's or routes'."""
+def act(action, fields, get=gates.get, put=gates.put, keys=gates.list_keys):
+    """Use an offer as it was shown. None for an action that isn't People's or channels'."""
     agent = str(fields.get("agent") or "")
-    if action not in ("people-accept", "routes-accept"):
+    if action not in ("people-accept", "channels-accept"):
         return None
     if not AGENT.match(agent):
         return {"ok": False, "message": "That isn't an agent."}
@@ -251,19 +289,26 @@ def act(action, fields, get=gates.get, put=gates.put):
         if action == "people-accept":
             offer, rev = get(gates.OFFERS, agent)
             if not offer or str(rev) != str(fields.get("offer_rev") or ""):
-                return {"ok": False, "message": f"{agent}'s bridge changed its offer since you opened it: open it again."}
+                return {"ok": False, "message": f"{agent}'s bridge changed its file since you opened it: open it again."}
             why = gates.valid(offer.get("doc"))
             if why:
                 return {"ok": False, "message": f"Not saved: {why}."}
             put(gates.PEOPLE, agent, offer["doc"], if_rev=0)
             return {"ok": True, "message": f"{agent}'s people are in loom; its bridge reads them within a minute.",
                     "page": f"people/{agent}"}
-        offer, rev = get(gates.ROUTE_OFFERS, agent)
+        src = str(fields.get("from") or "")
+        offer, rev = get(gates.ROUTE_OFFERS, src) if AGENT.match(src) else (None, 0)
         if not offer or str(rev) != str(fields.get("offer_rev") or "") or not isinstance(offer.get("doc"), dict):
-            return {"ok": False, "message": "That bridge changed its offer since you opened it: open it again."}
-        put(gates.ROUTES, gates.HOUSEHOLD, offer["doc"], if_rev=0)
-        return {"ok": True, "message": "The household's routes are in loom; every bridge reads them within a minute.",
-                "page": "routes"}
+            return {"ok": False, "message": "That bridge changed its file since you opened it: open it again."}
+        household, parts = gates.split(offer["doc"], src)
+        if agent not in parts:
+            return {"ok": False, "message": f"That file says nothing about {agent}."}
+        if get(gates.ROUTES, gates.HOUSEHOLD)[0] is None:
+            put(gates.ROUTES, gates.HOUSEHOLD, household, if_rev=0)
+        put(gates.CHANNELS, agent, parts[agent], if_rev=0)
+        left = sorted(set(parts) - set(keys(gates.CHANNELS)) - {agent})
+        return {"ok": True, "page": f"channels/{agent}", "message": f"{agent}'s channels are in loom. " + (
+            f"The bridges switch once {', '.join(left)}'s are too." if left else "The bridges read them within a minute.")}
     except ValueError as e:
         return {"ok": False, "message": str(e)}
     except OSError as e:

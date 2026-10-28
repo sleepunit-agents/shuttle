@@ -36,6 +36,9 @@
       "bodies": {
         "writers": "agent",
         "history": false
+      },
+      "channels": {
+        "writers": "owner"
       }
     }
   }

@@ -111,99 +111,99 @@ class Page(unittest.TestCase):
         self.s = Store()
 
     def act(self, action, fields):
-        return gates_page.act(action, fields, get=self.s.get, put=self.s.put)
+        return gates_page.act(action, fields, get=self.s.get, put=self.s.put, keys=self.s.keys)
 
-    def test_an_offer_is_shown_as_tables_and_saved_exactly_as_shown(self):
+    def test_an_agents_people_are_checked_on_its_page_and_saved_exactly_as_shown(self):
         self.s.put(gates.OFFERS, "pip", {"doc": DOC, "at": 1, "from": "discord"})
-        sec = gates_page.section(get=self.s.get, keys=self.s.keys)
-        self.assertIn("press the button", sec["blocks"][0]["text"], "it says what to do")
-        row = sec["blocks"][1]["items"][0]
-        self.assertEqual(row["page"], "offer/pip")
-        self.assertNotIn("act", row, "never a one-tap accept")
-        pg = gates_page.offer_page("pip", get=self.s.get)
-        callout, table, form = pg["sections"][0]["blocks"]
+        sec = gates_page.agent_section("pip", get=self.s.get, keys=self.s.keys)
+        self.assertEqual(sec["blocks"][0]["items"][0]["page"], "people/pip")
+        self.assertEqual([a["page"] for a in gates_page.asks(get=self.s.get, keys=self.s.keys)], ["people/pip"])
+        self.assertNotIn("agent", gates_page.asks(get=self.s.get, keys=self.s.keys)[0], "the household owner's alone")
+        callout, table, form = gates_page.people_page("pip", get=self.s.get)["sections"][0]["blocks"]
         self.assertIn("robin", callout["text"], "tier 3 is flagged")
         self.assertEqual(table["rows"][0][:3], ["Robin", "robin", "3 · owner"])
         self.assertEqual((form["fields"], form["hidden"]), ([], {"agent": "pip", "offer_rev": "1"}), "no JSON box")
-        # The bridge changes its offer after the owner opened it: refused.
         self.s.put(gates.OFFERS, "pip", {"doc": {"people": {"evil": {"tier": 3}}}, "at": 2})
-        self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "1"})["ok"])
+        self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "1"})["ok"], "changed since shown")
         self.assertTrue(self.act("people-accept", {"agent": "pip", "offer_rev": "2"})["ok"])
-        self.assertEqual(self.s.get(gates.PEOPLE, "pip")[0], {"people": {"evil": {"tier": 3}}}, "what was shown at rev 2")
+        self.assertEqual(self.s.get(gates.PEOPLE, "pip")[0], {"people": {"evil": {"tier": 3}}})
         self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "2"})["ok"], "never over a saved one")
-        self.assertFalse(self.act("people-accept", {"agent": "../x", "offer_rev": "2"})["ok"])
-        self.assertIsNone(self.act("people-save", {}), "no free-form save")
+        self.assertEqual(gates_page.asks(get=self.s.get, keys=self.s.keys), [])
+        self.assertIsNone(self.act("people-save", {}))
 
     def test_a_long_document_fits_the_page(self):
         many = {"people": {f"p{i}": {"name": "N" * 40, "tier": 2, "slack": {"T": f"U{i}"}, "grant": ["x" * 50] * 20}
                            for i in range(300)}}
         self.s.put(gates.OFFERS, "pip", {"doc": many, "at": 1})
-        for b in gates_page.offer_page("pip", get=self.s.get)["sections"][0]["blocks"]:
-            for r in b.get("rows") or []:
-                self.assertLessEqual(len(r), 5)
-                self.assertTrue(all(len(str(c)) <= gates_page.CELL for c in r))
+        for b in gates_page.people_page("pip", get=self.s.get)["sections"][0]["blocks"]:
+            self.assertTrue(all(len(str(c)) <= gates_page.CELL for r in b.get("rows") or [] for c in r))
             self.assertLessEqual(len(b.get("rows") or []), gates_page.ROWS)
 
 
-ROUTES = {"bots": {"kit": "1", "pip": "2"}, "channels": {"c1": "kit"}}
+MAP = {"guild": "g1", "bots": {"kit": "b1", "pip": "b2"}, "bot_roles": {"kit": "r1"},
+       "channels": {"c1": {"name": "general", "primary": "kit"}, "c2": {"name": "games", "primary": "pip"},
+                    "c3": {"name": "lobby", "primary": None}},
+       "threads": {}, "notify": {"kit": "c1", "general": "c1"}, "ignore": {"c9": 1}, "notes_channels": {"c1": 1},
+       "webhook_peers": {"w1": "x"}, "peer_turns_each": None, "_comment": "notes"}
 
 
-class Routes(unittest.TestCase):
-    """bridges.md step 3: one household route map in loom, read by every agent's bridge."""
+class Channels(unittest.TestCase):
+    """Each agent's part of the route map is its own: a list of agents isn't the household's."""
 
     def setUp(self):
         self.s = Store()
 
-    def ask(self, caller, argv):
-        return gates.api_answer(caller, argv, run_get=self.s.get, run_put=self.s.put)
-
     def act(self, action, fields):
-        return gates_page.act(action, fields, get=self.s.get, put=self.s.put)
+        return gates_page.act(action, fields, get=self.s.get, put=self.s.put, keys=self.s.keys)
 
-    def test_every_agents_bridge_reads_the_one_map_and_only_offers(self):
-        self.assertEqual(json.loads(self.ask({"kind": "agent", "agent": "kit"}, ["routes"])["body"]["stdout"]), {"doc": None, "rev": 0})
-        self.assertEqual(self.ask({"kind": "agent", "agent": "kit"}, ["offer-routes", "--doc", json.dumps(ROUTES)])["status"], 200)
-        self.assertEqual(self.s.get(gates.ROUTES, gates.HOUSEHOLD), (None, 0), "an offer never becomes the map")
-        self.assertEqual(self.s.get(gates.ROUTE_OFFERS, "kit")[0]["doc"], ROUTES)
-        self.assertEqual(self.ask({"kind": "agent", "agent": "kit"}, ["offer-routes", "--doc", "[1]"])["status"], 400)
-        self.assertEqual(self.ask({"kind": "owner"}, ["routes"])["status"], 403)
-        self.s.put(gates.ROUTES, gates.HOUSEHOLD, ROUTES)
-        for a in ("kit", "pip"):
-            self.assertEqual(json.loads(self.ask({"kind": "agent", "agent": a}, ["routes"])["body"]["stdout"])["doc"], ROUTES)
+    def ask(self, agent):
+        r = gates.api_answer({"kind": "agent", "agent": agent}, ["routes"], run_get=self.s.get, run_put=self.s.put,
+                             run_keys=self.s.keys)
+        return json.loads(r["body"]["stdout"])["doc"]
 
-    def test_two_bridges_copies_are_compared_and_one_is_used_as_shown(self):
-        older = {"bots": {"kit": "1"}, "channels": {"c1": {"name": "general", "primary": "kit"}}, "ignore": {"c9": 1}}
-        newer = {"bots": {"kit": "1", "pip": "2"}, "channels": {"c1": {"name": "general", "primary": "kit"},
-                                                                 "c2": {"name": "games", "primary": "pip"}},
-                 "_updated": "2026-10-12 (#games added)"}
+    def test_split_then_assembled_is_what_the_bridge_had(self):
+        household, parts = gates.split(MAP, "kit")
+        self.assertEqual(sorted(parts), ["kit", "pip"])
+        self.assertEqual(parts["kit"]["answers"], {"c1": "general"})
+        self.assertEqual(parts["kit"]["extra"], {"ignore": {"c9": 1}, "notes_channels": {"c1": 1}}, "the bridge's own")
+        self.assertNotIn("extra", parts["pip"])
+        self.assertEqual(sorted(household), ["channel_names", "guild", "notify", "peer_turns_each", "webhook_peers"])
+        got = gates.assemble("kit", household, parts)
+        self.assertEqual({k: v for k, v in MAP.items() if not k.startswith("_")}, got)
+
+    def test_the_bridge_switches_only_once_every_agent_it_knows_is_saved(self):
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": MAP, "at": 1})
+        self.assertEqual(sorted(a["page"] for a in gates_page.asks(get=self.s.get, keys=self.s.keys)),
+                         ["channels/kit", "channels/pip"])
+        form = gates_page.channels_page("kit", get=self.s.get, keys=self.s.keys)["sections"][0]["blocks"][-1]
+        self.assertEqual((form["fields"], form["hidden"]), ([], {"agent": "kit", "from": "kit", "offer_rev": "1"}))
+        r = self.act("channels-accept", form["hidden"])
+        self.assertTrue(r["ok"])
+        self.assertIn("once pip's are too", r["message"])
+        self.assertIsNone(self.ask("kit"), "pip's channels aren't in loom yet: keep the file")
+        pip_form = gates_page.channels_page("pip", get=self.s.get, keys=self.s.keys)["sections"][0]["blocks"][-1]
+        self.assertEqual(pip_form["hidden"]["from"], "kit", "pip has no bridge: the copy that knows its bot")
+        self.assertTrue(self.act("channels-accept", pip_form["hidden"])["ok"])
+        self.assertEqual(self.ask("kit"), {k: v for k, v in MAP.items() if not k.startswith("_")})
+        self.assertEqual(gates_page.asks(get=self.s.get, keys=self.s.keys), [])
+
+    def test_two_copies_differ_about_an_agent_and_two_agents_claiming_a_channel_is_an_ask(self):
+        newer = json.loads(json.dumps(MAP))
+        newer["channels"]["c4"] = {"name": "fez-room", "primary": "kit"}
         self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": newer, "at": 1})
-        self.s.put(gates.ROUTE_OFFERS, "pip", {"doc": older, "at": 1})
-        rows = gates_page.section(get=self.s.get, keys=self.s.keys)["blocks"][1]["items"]
-        self.assertEqual([r["page"] for r in rows], ["routes-offer/kit", "routes-offer/pip"])
-        self.assertIn("updated 2026-10-12", rows[0]["meta"])
-        blocks = gates_page.routes_offer_page("kit", get=self.s.get, keys=self.s.keys)["sections"][0]["blocks"]
-        diff = blocks[0]["text"]
-        self.assertIn("only here: #games", diff)
-        self.assertIn("never answers in 1 more", diff)
-        form = blocks[-1]
-        self.assertEqual(form["fields"], [])
-        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": newer, "at": 2})
-        self.assertFalse(self.act("routes-accept", {"agent": "kit", "offer_rev": form["hidden"]["offer_rev"]})["ok"])
-        self.assertTrue(self.act("routes-accept", {"agent": "kit", "offer_rev": "2"})["ok"])
-        self.assertEqual(self.s.get(gates.ROUTES, gates.HOUSEHOLD), (newer, 1))
-        self.assertFalse(self.act("routes-accept", {"agent": "pip", "offer_rev": "1"})["ok"], "never over a saved map")
-        rows = gates_page.section(get=self.s.get, keys=self.s.keys)["blocks"][-1]["items"]
-        self.assertEqual([r["page"] for r in rows], ["routes"])
-        self.assertEqual(gates_page.routes_page(get=self.s.get)["sections"][0]["blocks"][1]["rows"][0][:2], ["#games", "pip"])
-
-    def test_a_bridge_reads_loom_once_saved_else_its_file_offered_once(self):
-        d = Path(tempfile.mkdtemp(prefix="shuttle-routes-"))
-        f = d / "routes.json"
-        f.write_text(json.dumps(ROUTES))
-        calls, loom = [], {"doc": None, "rev": 0}
-        r = gates.Routes(f, remote=lambda argv: calls.append(argv[0]) or (loom if argv[0] == "routes" else {"ok": True}))
-        self.assertEqual(r.doc(), ROUTES)
-        self.assertEqual(calls, ["routes", "offer-routes"])
+        self.s.put(gates.ROUTE_OFFERS, "pip", {"doc": MAP, "at": 1})
+        blocks = gates_page.channels_page("pip", get=self.s.get, keys=self.s.keys)["sections"][0]["blocks"]
+        self.assertEqual(blocks[-1]["hidden"]["from"], "pip", "its own bridge's copy first")
+        kit_blocks = gates_page.channels_page("kit", get=self.s.get, keys=self.s.keys)["sections"][0]["blocks"]
+        self.assertIn("pip's copy doesn't have kit in #fez-room", kit_blocks[0]["text"])
+        self.s.put(gates.CHANNELS, "kit", {"answers": {"c1": "general"}})
+        self.s.put(gates.CHANNELS, "pip", {"answers": {"c1": "general", "c2": "games"}})
+        ask = [a for a in gates_page.asks(get=self.s.get, keys=self.s.keys) if "both" in a["text"]]
+        self.assertEqual(len(ask), 1)
+        self.assertIsNone(gates.assemble("kit", {}, {a: self.s.get(gates.CHANNELS, a)[0] for a in ("kit", "pip")})
+                          ["channels"]["c1"]["primary"], "nobody answers unmentioned until it's settled")
+        self.assertEqual(gates_page.channels_page("kit", get=self.s.get, keys=self.s.keys)["sections"][0]["blocks"][0]["title"],
+                         "Two agents answer here")
 
 
 if __name__ == "__main__":
