@@ -37,6 +37,7 @@ from shuttle import nowlog  # noqa: E402  the "now board" (t-1403)
 from shuttle import inbox  # noqa: E402  a working body hears follow-ups (t-1409)
 from shuttle import people as person_cards  # noqa: E402  loom person cards (t-1381)
 from shuttle import core as shuttle_core  # noqa: E402  the shared bridge core (t-1423)
+from shuttle import upgrade  # noqa: E402  stop when idle and behind, so a fresh house starts on new code
 from shuttle import dispatch as shuttle_dispatch  # noqa: E402
 from shuttle import spawn as shuttle_spawn  # noqa: E402
 from shuttle import selvedge as shuttle_selvedge  # noqa: E402
@@ -59,6 +60,8 @@ API = "https://discord.com/api/v10"
 CLAUDE = INSTANCE.commands.get("claude") or Path.home() / ".local/bin/claude"
 DISCORD_SEND = (INSTANCE.commands.get("send") or {}).get("discord")
 WORKDIR = INSTANCE.workdir   # the bodies' cwd
+# This shuttle's checkout and the agent's repo the bodies work in: stale ones are picked up when idle.
+UPGRADE = upgrade.Upgrader([Path(__file__).resolve().parent.parent, WORKDIR])
 
 
 def _instance_routes():
@@ -1215,6 +1218,10 @@ def tick(state):
     except Exception as e:
         print(f"now board: snapshot: {e!r}", file=sys.stderr, flush=True)
     save_state(state)
+    # Idle and behind: the main loop stops after this tick; cursors are saved, so nothing is missed.
+    why = UPGRADE.tick(talking_items(state), holds)
+    if why:
+        UPGRADING.append(why)
 
 
 def page(msg):
@@ -1351,8 +1358,13 @@ def main():
                 page(f"{SLUG}-discord bridge is deaf: {failed_ticks} consecutive tick errors "
                      f"(~{failed_ticks * POLL_SECONDS // 60} min), latest {e!r}. "
                      f"journalctl --user -u {SLUG}-discord.service")
+        if UPGRADING:
+            print(UPGRADING[0], flush=True)
+            sys.exit(0)
         time.sleep(POLL_SECONDS)
 
+
+UPGRADING = []   # set by a tick that's idle and behind: stop, and the service starts fresh
 
 load_who()   # who is who from the first poll on; each tick reloads it
 
