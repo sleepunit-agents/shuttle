@@ -111,15 +111,26 @@ class Page(unittest.TestCase):
     def act(self, action, fields):
         return gates_page.act(action, fields, get=self.s.get, put=self.s.put)
 
-    def test_accepting_an_offer_makes_it_the_gates(self):
+    def test_an_offer_is_reviewed_then_saved_over_the_offer_shown(self):
         self.s.put(gates.OFFERS, "pip", {"doc": DOC, "at": 1, "from": "discord"})
         sec = gates_page.section(get=self.s.get, keys=self.s.keys)
         row = sec["blocks"][0]["items"][0]
-        self.assertEqual(row["act"]["action"], "people-accept")
-        self.assertTrue(self.act("people-accept", {"agent": "pip"})["ok"])
-        self.assertEqual(self.s.get(gates.PEOPLE, "pip"), (DOC, 1))
+        self.assertEqual(row["page"], "offer/pip")
+        self.assertNotIn("act", row, "never a one-tap accept")
+        pg = gates_page.offer_page("pip", get=self.s.get)
+        callout, form = pg["sections"][0]["blocks"]
+        self.assertIn("robin", callout["text"], "tier 3 is flagged")
+        self.assertEqual(form["hidden"], {"agent": "pip", "offer_rev": "1"})
+        # The bridge changes its offer after the owner opened it: refused.
+        self.s.put(gates.OFFERS, "pip", {"doc": {"people": {"evil": {"tier": 3}}}, "at": 2})
+        self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "1", "doc": form["fields"][0]["value"]})["ok"])
+        # Opened again and saved as the owner read (and trimmed) it.
+        form = gates_page.offer_page("pip", get=self.s.get)["sections"][0]["blocks"][-1]
+        trimmed = {"people": {}, "agents": {}}
+        self.assertTrue(self.act("people-accept", {"agent": "pip", "offer_rev": form["hidden"]["offer_rev"], "doc": json.dumps(trimmed)})["ok"])
+        self.assertEqual(self.s.get(gates.PEOPLE, "pip"), (trimmed, 1))
         # Accepting again doesn't overwrite what's there now.
-        self.assertFalse(self.act("people-accept", {"agent": "pip"})["ok"])
+        self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "2", "doc": json.dumps(DOC)})["ok"])
 
     def test_saving_is_over_the_revision_opened_and_checked(self):
         self.s.put(gates.PEOPLE, "kit", DOC)
