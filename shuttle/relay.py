@@ -150,11 +150,15 @@ def api_answer(inst, people, request):
     if not isinstance(request, dict):
         return refuse(400, "not a piece API request")
     caller = request.get("caller") or {}
+    # An agent owner (loom's docs/specs/owners.md) relays only through an agent they own.
+    own = caller.get("agents") if caller.get("kind") == "owner" and isinstance(caller.get("agents"), list) else None
     if caller.get("kind") == "agent":
         if caller.get("agent") != inst.agent_slug:
             return refuse(403, f"these bridges are {inst.agent_slug}'s; another agent relays through its own")
     elif caller.get("kind") != "owner":
         return refuse(403, "only the owner and this agent's bodies relay")
+    elif own is not None and inst.agent_slug not in own:
+        return refuse(403, f"these bridges are {inst.agent_slug}'s, and that isn't one of your agents")
     if request.get("path") != "run":
         return refuse(404, "the one call is run")
     argv = (request.get("body") or {}).get("argv")
@@ -182,7 +186,7 @@ def api_answer(inst, people, request):
             # a queue: every body of the agent shares its role, and one steered into
             # taking would swallow relays meant for a conversation (t-1591).
             via = flags.get("via", "")
-            if caller.get("kind") != "owner" and caller.get("service") != via:
+            if (caller.get("kind") != "owner" or own is not None) and caller.get("service") != via:
                 return refuse(403, f"only the {via} bridge takes the {via} queue")
             out = take(inst, via)
             return {"status": 200, "body": {"exit": 0, "stdout": json.dumps(out) + "\n", "stderr": ""}}

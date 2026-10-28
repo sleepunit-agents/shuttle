@@ -73,7 +73,8 @@ def manifest(d, now):
         tone = "bad" if asks or v >= 0.95 else "warn" if v >= 0.8 else "ok"
     else:
         value, detail, tone = f"{len(d['subscriptions'])}", "usage not read yet" if d["subscriptions"] else "none yet", "bad" if asks else "ok"
-    return {"v": 2, "tab": {"label": "Subscriptions"},
+    # owners: 2 (loom's docs/specs/owners.md): an agent owner gets their agents' Fuel, read-only.
+    return {"v": 2, "owners": 2, "tab": {"label": "Subscriptions"},
             "tile": {"label": "Subscriptions", "value": value, "detail": detail[:160],
                      "tone": tone, "page": ""},
             "asks": asks[:10],
@@ -162,6 +163,47 @@ def _login(c, now):
     return "ok", "Valid"
 
 
+def owner_agents(caller):
+    """An owner caller's agents (loom's docs/specs/owners.md): None for a household owner (or no caller), else the list."""
+    if not isinstance(caller, dict) or caller.get("kind") != "owner":
+        return None
+    a = caller.get("agents")
+    if a is None or a == "*":
+        return None
+    return [x for x in a if isinstance(x, str)] if isinstance(a, list) else []
+
+
+def their_subs(d, own):
+    """The subscriptions an agent owner's agents run on, in order."""
+    return [n for a in own for n in d["assign"].get(a, []) if n in d["subscriptions"]]
+
+
+def fuel_page(d, now, own):
+    """An agent owner's page: what their agents run on, how full it is, whether its logins work. Read-only,
+    but for Check now: signing in, adding and assigning are the household owner's."""
+    sections = []
+    f = fuel(d)
+    for a in own:
+        order = [n for n in d["assign"].get(a, []) if n in d["subscriptions"]]
+        reading = (f.get(a) or {}).get("readings", [{}])[0]
+        sections.append({"id": f"agent-{a}", "title": a.capitalize(), "blocks": [
+            {"type": "kv", "items": [{"label": "Runs on", "value": " → ".join(d["subscriptions"][n]["label"] for n in order) or "any subscription of the provider"},
+                                     {"label": "Fuel", "value": reading.get("value") or "not read yet"}]}]})
+    mine = their_subs(d, own)
+    sub_d = {"subscriptions": {n: d["subscriptions"][n] for n in mine}}
+    meters = _meters(sub_d, now)
+    sections.append({"id": "usage", "title": "Usage", "blocks": [{"type": "meter", "items": meters[:20]}] if meters
+                     else [{"type": "text", "text": "Not read yet.", "tone": "muted"}]})
+    logins = [{"label": f"{d['subscriptions'][n]['label']} · {subs.KINDS[c['kind']]}", "tone": _login(c, now)[0], "text": _login(c, now)[1],
+               "meta": _ago(c.get("checked"), now).removesuffix(" ago")} for n in dict.fromkeys(mine) for c in d["subscriptions"][n]["credentials"]]
+    blocks = [{"type": "status", "items": logins[:50]}] if logins else [{"type": "text", "text": "No logins yet.", "tone": "muted"}]
+    if mine:
+        blocks.append({"type": "buttons", "items": [{"action": "check", "label": f"Check {d['subscriptions'][n]['label']} now", "fields": {"sub": n}} for n in list(dict.fromkeys(mine))[:4]]})
+    blocks.append({"type": "text", "tone": "muted", "text": "Signing in, adding a subscription and choosing what an agent runs on are the household owner's."})
+    sections.append({"id": "logins", "title": "Logins", "blocks": blocks})
+    return {"title": "Fuel", "intro": "What your agents run on, and how much is left.", "sections": sections[:10]}
+
+
 def overview(d, now):
     sections = []
     meters = _meters(d, now)
@@ -241,6 +283,9 @@ def overview(d, now):
 def act(d, req):
     action = req.get("action")
     f = req.get("fields") if isinstance(req.get("fields"), dict) else {}
+    own = owner_agents(req.get("caller"))
+    if own is not None and not (action == "check" and f.get("sub") in their_subs(d, own)):
+        return {"ok": False, "message": "That's the household owner's to do."}
     try:
         if action == "add":
             subs.add_subscription(d, (f.get("name") or "").strip(), f.get("provider") or "anthropic", f.get("label") or "",
@@ -306,6 +351,8 @@ def api_answer(d, request, run):
             return refuse(403, "an agent is issued only its own")
     elif caller.get("kind") != "owner":
         return refuse(403, "only the owner and the agents with an order here")
+    elif owner_agents(caller) is not None and argv[1] not in owner_agents(caller):
+        return refuse(403, f"{argv[1]} isn't one of your agents")
     if argv[1] not in d["assign"]:
         return refuse(403, f"{argv[1]} has no order here")
     code, out, err = run(argv)
@@ -376,7 +423,12 @@ def main(argv):
         if args[1:] == []:
             print(json.dumps(manifest(d, now)))
         elif args[1:] == ["page"]:
-            path = _request().get("path") or ""
+            req = _request()
+            path = req.get("path") or ""
+            own = owner_agents(req.get("caller"))
+            if own is not None:
+                print(json.dumps(fuel_page(d, now, own) if path == "" else {"title": "Not found", "sections": []}))
+                return 0
             out = overview(d, now) if path == "" else signin_page.progress_page(path[len("signin/"):], back="") if path.startswith("signin/") \
                 else {"title": "Not found", "sections": []}
             print(json.dumps(out))

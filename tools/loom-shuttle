@@ -66,6 +66,9 @@ def signin_page(path):
 
 def act(req):
     action, fields = req.get("action"), req.get("fields") if isinstance(req.get("fields"), dict) else {}
+    # Signing a harness in is the household owner's (loom's docs/specs/owners.md).
+    if loomui.owner_agents(req.get("caller")) is not None:
+        return {"ok": False, "message": "That's the household owner's to do."}
     if action == "signin-start":
         return signin_page_mod.start_act(fields.get("harness"))
     if action == "signin-code":
@@ -97,10 +100,21 @@ def main(argv):
     if args[1:] == ["page"]:
         req = _request()
         path = req.get("path") if isinstance(req.get("path"), str) else ""
+        own = loomui.owner_agents(req.get("caller"))
+        # An agent owner: these bridges if they own the agent they serve, never the sign-in pages.
+        inst = instance.load() if own is not None or not (path == "signin" or path.startswith("signin/")) else None
+        if own is not None and (inst.agent_slug not in own or path == "signin" or path.startswith("signin/")):
+            why = ("Signing a harness in is the household owner's." if inst.agent_slug in own
+                   else f"These bridges are {inst.agent_name}'s, and {inst.agent_name} isn't one of your agents.")
+            print(json.dumps({"title": "Bridges", "sections": [{"id": "none", "blocks": [{"type": "text", "tone": "muted", "text": why}]}]}))
+            return 0
         if path == "signin" or path.startswith("signin/"):
             print(json.dumps(signin_page(path)))
             return 0
-        out = loomui.page(loomui.View.of(instance.load()), path, req.get("query"))
+        out = loomui.page(loomui.View.of(inst), path, req.get("query"))
+        if own is not None:
+            # The house rules and signing in are the household owner's.
+            out["sections"] = [x for x in out.get("sections", []) if x.get("id") not in ("signin", "house-rules")]
         print(json.dumps(out))
         return 0
     print(json.dumps(loomui.manifest(loomui.View.of(instance.load()))))
