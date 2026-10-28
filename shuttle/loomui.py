@@ -354,7 +354,11 @@ def _talking(view):
 def _bridge_page(view, b):
     sec = _bridge_section(view, b)
     sec["title"] = ""
-    return {"title": _title(b["name"]), "sections": [sec, _conversations(view, only=b["name"])]}
+    # What it's in right now gets its own card, like the conversations below it (not a line under the tiles).
+    now = [x for x in sec["blocks"] if x["type"] == "list"]
+    sec["blocks"] = [x for x in sec["blocks"] if x["type"] != "list"]
+    cards = [sec] + ([{"id": "now", "title": "Now", "blocks": now}] if now else [])
+    return {"title": _title(b["name"]), "sections": cards + [_conversations(view, only=b["name"])]}
 
 
 def _section_id(name):

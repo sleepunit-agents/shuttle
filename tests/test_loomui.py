@@ -240,7 +240,9 @@ class Page(Fixture):
     def test_a_bridges_own_page(self):
         p = self.page("bridge/chat")
         self.assertEqual(p["title"], "Chat")
-        stats, now = p["sections"][0]["blocks"][:2]
+        [stats] = p["sections"][0]["blocks"][:1]
+        self.assertEqual(p["sections"][1]["title"], "Now")
+        [now] = p["sections"][1]["blocks"]
         self.assertEqual(stats["items"], [
             {"label": "State", "value": "running", "detail": "checked 4s ago", "tone": "ok"},
             {"label": "Bodies", "value": "1/5", "detail": "1 talking, 1 waiting"},
@@ -251,12 +253,12 @@ class Page(Fixture):
         self.assertEqual(now, {"type": "list", "items": [
             {"text": "#general with Pat", "meta": "active 4s · 2 queued"},
             {"text": "#b with Sam", "meta": "waiting: every body is busy", "tone": "warn"}]})
-        self.assertEqual(len(p["sections"][0]["blocks"]), 2)   # no socket, no note
+        self.assertEqual(len(p["sections"][0]["blocks"]), 1)   # no socket, no note; Now is its own card
         # Idle: the Bodies tile says so, and nothing hangs under the tiles.
         talk = self.page("bridge/talk")["sections"][0]
         self.assertEqual(talk["blocks"][0]["items"][1]["detail"], "idle, nobody waiting")
         self.assertNotIn("list", [x["type"] for x in talk["blocks"]])
-        self.assertEqual([i["text"] for i in p["sections"][1]["blocks"][0]["items"]], ["Pat"], "only its own conversations")
+        self.assertEqual([i["text"] for i in p["sections"][2]["blocks"][0]["items"]], ["Pat"], "only its own conversations")
 
     def test_socket_rotation_note(self):
         talk = self.page("bridge/talk")["sections"][0]
