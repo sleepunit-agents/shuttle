@@ -311,6 +311,13 @@ def errors(instance):
     if section is not None and not isinstance(section, dict):
         return [f"{instance.path}: runner must be an object, e.g. {{\"kind\": \"claude\"}}"]
     k = kind(instance)
+    host = section.get("host") if isinstance(section, dict) else None
+    if host is not None:
+        from shuttle import bodies
+        names = list(host.values()) if isinstance(host, dict) else [host]
+        if not names or not all(isinstance(n, str) and bodies.PROFILE.match(n) for n in names):
+            return [f"{instance.path}: runner.host is the body host's service name (lowercase), "
+                    f"or {{bridge: name}}, not {host!r}"]
     if not isinstance(k, str) or k not in KINDS:
         return [f"{instance.path}: runner.kind {k!r} is not one of: {', '.join(sorted(KINDS))}"]
     if k == "codex":
@@ -350,7 +357,16 @@ def deny_errors(instance, guest_venues=()):
     return out
 
 
-def build_runner(instance, b):
+def host_profile(instance, bridge=None):
+    """shuttle.json's runner.host, for this bridge: the body host's profile when the agent's
+    bodies run in its own house (shuttle/bodies.py), else None. One name for every bridge,
+    or {bridge: name}, since each bridge's bodies may use different secrets."""
+    section = instance.raw.get("runner")
+    host = section.get("host") if isinstance(section, dict) else None
+    return host.get(bridge) if isinstance(host, dict) else host
+
+
+def build_runner(instance, b, bridge=None):
     """The bridge's runner. `b` is the adapter: a Claude runner takes its
     binary, jobs dir, model resolver and preferred model from b.CLAUDE,
     b.JOBS_DIR, b.MODEL_RESOLVER, b.PREFERRED_MODEL (the adapter's globals,
@@ -361,4 +377,12 @@ def build_runner(instance, b):
     problems = errors(instance)
     if problems:
         raise ValueError(problems[0])
-    return KINDS[kind(instance)](instance, b)
+    local = KINDS[kind(instance)](instance, b)
+    profile = host_profile(instance, bridge)
+    if not profile:
+        return local
+    from shuttle import bodies, inbox
+    wire = bodies.Wire(profile)
+    remote = bodies.RemoteRunner(wire, policy=local, time=b.time, secrets=b.secrets)
+    inbox.configure(remote=bodies.RemoteInbox(wire, remote))
+    return remote

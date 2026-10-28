@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shuttle import gates, gates_page, instance, loomui, relay, signin  # noqa: E402
+from shuttle import bodies, gates, gates_page, instance, loomui, relay, signin  # noqa: E402
 from shuttle import signin_page as signin_page_mod  # noqa: E402
 import subprocess  # noqa: E402
 
@@ -89,8 +89,18 @@ def api(req):
         except (OSError, ValueError) as e:
             return {"status": 503, "body": {"error": f"shuttle's store: {e}"}}
         return out or {"status": 400, "body": {"error": "argv is: people, or offer-people --doc JSON"}}
+    if isinstance(argv, list) and argv and argv[0] == "bodies":
+        # A bridge asks for a body, and the agent's body host takes the asks (shuttle/bodies.py).
+        try:
+            return bodies.api_answer(req.get("caller") or {}, argv, store=_Store)
+        except OSError as e:
+            return {"status": 503, "body": {"error": f"shuttle's store: {e}"}}
     inst = instance.load()
     return relay.api_answer(inst, _people_of(inst), req)
+
+
+class _Store:
+    get, put, delete, docs = staticmethod(gates.get), staticmethod(gates.put), staticmethod(gates.delete), staticmethod(gates.docs)
 
 
 def _people_of(inst):

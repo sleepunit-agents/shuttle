@@ -560,7 +560,7 @@ def _cfg():
                          min_avail_mb=MIN_AVAIL_MB, cooldown_s=CHANNEL_COOLDOWN,
                          wait_ttl=LEFTOVER_TTL_S, workdir=WORKDIR, tag=INSTANCE.agent_tag,
                          agent=SLUG, always_deny=INSTANCE.always_deny,
-                         runner=shuttle_runner.build_runner(INSTANCE, _B))
+                         runner=shuttle_runner.build_runner(INSTANCE, _B, bridge="discord"))
 
 
 class _Bridge:
