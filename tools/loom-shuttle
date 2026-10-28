@@ -142,12 +142,10 @@ def main(argv):
         if path == "signin" or path.startswith("signin/"):
             print(json.dumps(signin_page(path)))
             return 0
-        # Each agent's people document (its gates), a household owner's alone.
-        if path.startswith(("people/", "offer/", "routes-offer/")) or path == "routes":
-            pg = (gates_page.page(path[len("people/"):]) if path.startswith("people/")
-                  else gates_page.offer_page(path[len("offer/"):]) if path.startswith("offer/")
-                  else gates_page.routes_offer_page(path[len("routes-offer/"):]) if path.startswith("routes-offer/")
-                  else gates_page.routes_page())
+        # Each agent's people and channels (its gates), a household owner's alone.
+        if path.startswith(("people/", "channels/")):
+            pg = (gates_page.people_page(path[len("people/"):]) if path.startswith("people/")
+                  else gates_page.channels_page(path[len("channels/"):]))
             print(json.dumps(pg if own is None else {"title": "Not found", "sections": []}))
             return 0
         out = loomui.page(loomui.View.of(inst), path, req.get("query"))
@@ -156,16 +154,26 @@ def main(argv):
             out["sections"] = [x for x in out.get("sections", []) if x.get("id") not in ("signin", "house-rules")]
         elif path == "":
             try:
-                people = gates_page.section()
+                agents = sorted(set(gates.list_keys(gates.PEOPLE)) | set(gates.list_keys(gates.OFFERS))
+                                | set(gates.list_keys(gates.CHANNELS)) | {inst.agent_slug})
+                people = [x for x in (gates_page.agent_section(a) for a in agents) if x]
+                for x, a in zip(people, [a for a in agents if gates_page.agent_section(a)]):
+                    x["title"] = f"{a}'s people and channels"
             except (OSError, ValueError) as e:
-                people = {"id": "people", "title": "People and gates", "side": True,
-                          "blocks": [{"type": "text", "tone": "bad", "text": f"loom's store didn't answer: {e}"}]}
+                people = [{"id": "people", "title": "People and channels", "side": True,
+                           "blocks": [{"type": "text", "tone": "bad", "text": f"loom's store didn't answer: {e}"}]}]
             # Beside the house rules: what gates a body, then what it may do.
             at = next((i for i, x in enumerate(out["sections"]) if x.get("id") in ("house-rules", "signin")), len(out["sections"]))
-            out["sections"].insert(at, people)
+            out["sections"][at:at] = people
         print(json.dumps(out))
         return 0
-    print(json.dumps(loomui.manifest(loomui.View.of(instance.load()))))
+    m = loomui.manifest(loomui.View.of(instance.load()))
+    try:   # what only a household owner decides: offers to check, channels two agents claim
+        m["asks"] = (m.get("asks") or []) + gates_page.asks()
+        m["asks"] = m["asks"][:10]
+    except (OSError, ValueError) as e:
+        print(f"loom-shuttle: asks from the store failed ({e})", file=sys.stderr)
+    print(json.dumps(m))
     return 0
 
 
