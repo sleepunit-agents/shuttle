@@ -74,7 +74,8 @@ def manifest(d, now):
     else:
         value, detail, tone = f"{len(d['subscriptions'])}", "usage not read yet" if d["subscriptions"] else "none yet", "bad" if asks else "ok"
     # owners: 2 (loom's docs/specs/owners.md): an agent owner gets their agents' Fuel, read-only.
-    return {"v": 2, "owners": 2, "tab": {"label": "Subscriptions"},
+    # The accounts are the household's (under Setup); what each agent runs on is on its own Fuel tab.
+    return {"v": 2, "owners": 2, "tab": {"label": "Subscriptions", "kind": "setting"}, "agentTab": {"label": "Fuel"},
             "tile": {"label": "Subscriptions", "value": value, "detail": detail[:160],
                      "tone": tone, "page": ""},
             "asks": asks[:10],
@@ -178,6 +179,25 @@ def their_subs(d, own):
     return [n for a in own for n in d["assign"].get(a, []) if n in d["subscriptions"]]
 
 
+def agent_fuel_page(d, now, agent, editable):
+    """One agent's Fuel tab: what it runs on, in order, how full that is, whether its logins work;
+    and, for a household owner, its order to change (the accounts themselves are the household's)."""
+    page = fuel_page(d, now, [agent])
+    order = [n for n in d["assign"].get(agent, []) if n in d["subscriptions"]]
+    page["intro"] = (f"What {agent} runs on: its next body takes the first with a working login and room left, "
+                     "so one running out falls to the next.")
+    if editable:
+        names = ", ".join(sorted(d["subscriptions"])) or "none yet"
+        page["sections"].insert(1, {"id": "order", "title": "Its order", "blocks": [
+            {"type": "form", "action": "assign", "submit": "Save", "hidden": {"agent": agent}, "fields": [
+                {"name": "order", "label": "Subscriptions, in order", "kind": "text", "required": True,
+                 "value": ", ".join(order), "hint": f"names, comma separated: {names}"[:200]}]}]})
+        for x in page["sections"]:
+            if x["id"] == "logins":
+                x["blocks"] = [b for b in x["blocks"] if b.get("type") != "text"]
+    return page
+
+
 def fuel_page(d, now, own):
     """An agent owner's page: what their agents run on, how full it is, whether its logins work. Read-only,
     but for Check now: signing in, adding and assigning are the household owner's."""
@@ -257,16 +277,14 @@ def overview(d, now):
                 {"label": "Provider", "value": subs.PROVIDERS[sub["provider"]]},
                 {"label": "Whose", "value": sub.get("owner") or "not given"}]},
             {"type": "details", "summary": "Machine details", "meta": f"{len(rows)} credential{'s' if len(rows) != 1 else ''}", "blocks": machine}]})
-    agents = sorted(d["assign"].items())
-    sections.append({"id": "who", "title": "Who runs on what", "side": True, "blocks": [
-        {"type": "text", "text": "Each agent's order: its next body runs on the first with a valid credential and room left, so one running out falls to the next.", "tone": "muted"},
-        {"type": "table", "columns": ["Agent", "Order"], "rows": [[a, " → ".join(o)] for a, o in agents]} if agents
-        else {"type": "text", "text": "No orders yet: an agent uses any subscription of the provider.", "tone": "muted"},
-        {"type": "details", "summary": "Set an agent's order", "blocks": [
-            {"type": "form", "action": "assign", "submit": "Save", "fields": [
-                {"name": "agent", "label": "Agent", "kind": "text", "required": True},
-                {"name": "order", "label": "Subscriptions, in order", "kind": "text", "required": True, "hint": "names, comma separated"}]}]},
-    ]})
+    # What each agent runs on is that agent's (its Fuel tab); here, one link each.
+    agents = sorted(a for a in d["assign"] if subs.NAME.match(a))
+    sections.append({"id": "who", "title": "Each agent's fuel", "side": True, "blocks": [
+        {"type": "text", "text": "What each agent runs on, in order, is on its own Fuel tab.", "tone": "muted"},
+        {"type": "list", "items": [{"text": a.capitalize(), "agent": a, "page": f"agent:{a}",
+                                    "meta": " → ".join(d["subscriptions"][n]["label"] for n in d["assign"][a] if n in d["subscriptions"])}
+                                   for a in agents]} if agents
+        else {"type": "text", "text": "No orders yet: an agent uses any subscription of the provider.", "tone": "muted"}]})
     sections.append({"id": "add", "title": "", "side": True, "blocks": [
         {"type": "details", "summary": "Add a subscription", "blocks": [
             {"type": "form", "action": "add", "submit": "Add", "fields": [
@@ -296,6 +314,9 @@ def act(d, req):
             order = [x.strip() for x in (f.get("order") or "").split(",") if x.strip()]
             missing = [x for x in order if x not in d["subscriptions"]]
             agent = (f.get("agent") or "").strip()
+            scope = os.environ.get("LOOM_SCOPE", "").strip()
+            if scope and agent != scope:   # from an agent's Fuel tab: that agent's order only
+                return {"ok": False, "message": f"This is {scope}'s page."}
             if not subs.NAME.match(agent) or not order or missing:
                 return {"ok": False, "message": f"An agent's name and an order of subscriptions that exist{': no ' + ', '.join(missing) if missing else ''}."}
             d["assign"][agent] = order
@@ -428,6 +449,11 @@ def main(argv):
             req = _request()
             path = req.get("path") or ""
             own = owner_agents(req.get("caller"))
+            scope = os.environ.get("LOOM_SCOPE", "").strip()
+            if path == "" and subs.NAME.match(scope or "") and (own is None or scope in own):
+                # An agent's own Fuel tab (loom docs/extensions.md, agentTab).
+                print(json.dumps(agent_fuel_page(d, now, scope, editable=own is None)))
+                return 0
             if own is not None:
                 print(json.dumps(fuel_page(d, now, own) if path == "" else {"title": "Not found", "sections": []}))
                 return 0
