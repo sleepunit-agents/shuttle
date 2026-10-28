@@ -54,6 +54,7 @@ from shuttle import inbox  # noqa: E402  a working body hears follow-ups (t-1409
 from shuttle import relay  # noqa: E402  another body asks this bridge to say something (t-1570)
 from shuttle import people as person_cards  # noqa: E402  loom person cards (t-1381)
 from shuttle import core as shuttle_core  # noqa: E402  the shared bridge core (t-1423)
+from shuttle import upgrade  # noqa: E402  stop when idle and behind, so a fresh house starts on new code
 from shuttle import dispatch as shuttle_dispatch  # noqa: E402
 from shuttle import spawn as shuttle_spawn  # noqa: E402
 from shuttle import selvedge as shuttle_selvedge  # noqa: E402
@@ -121,6 +122,8 @@ FLAG_TO = SLACK.get("flag_to") or {}
 FLAG_SEND = (INSTANCE.commands.get("send") or {}).get(FLAG_TO.get("via"))
 FLAG_CHAN = FLAG_TO.get("chan") or _routes_value(FLAG_TO.get("chan_from_routes"))
 WORKDIR = INSTANCE.workdir   # the bodies' cwd
+# This shuttle's checkout and the agent's repo the bodies work in: stale ones are picked up when idle.
+UPGRADE = upgrade.Upgrader([Path(__file__).resolve().parent.parent, WORKDIR])
 
 PREFERRED_MODEL = INSTANCE.preferred_model
 MODEL_RESOLVER = INSTANCE.commands.get("model")   # rate-limit-aware resolver
@@ -1289,6 +1292,11 @@ def tick(state, people):
     except Exception as e:
         print(f"now board: snapshot: {e!r}", file=sys.stderr, flush=True)
     save_state(state)
+    # Idle and behind: stop the usual way (the main loop drains the queue into pending).
+    why = UPGRADE.tick(talking_items(state), holds)
+    if why:
+        print(why, flush=True)
+        STOP.set()
 
 
 def _brief_uses(name, slot):
