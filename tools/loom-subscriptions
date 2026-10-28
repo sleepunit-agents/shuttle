@@ -351,8 +351,10 @@ def api_answer(d, request, run):
             return refuse(403, "an agent is issued only its own")
     elif caller.get("kind") != "owner":
         return refuse(403, "only the owner and the agents with an order here")
-    elif owner_agents(caller) is not None and argv[1] not in owner_agents(caller):
-        return refuse(403, f"{argv[1]} isn't one of your agents")
+    elif owner_agents(caller) is not None:
+        # issue hands back a credential's value: an agent's own houses get theirs, and a household
+        # owner may, but never a person who owns only some agents (loom's docs/specs/owners.md).
+        return refuse(403, "a credential is issued to an agent's houses, or a household owner")
     if argv[1] not in d["assign"]:
         return refuse(403, f"{argv[1]} has no order here")
     code, out, err = run(argv)
