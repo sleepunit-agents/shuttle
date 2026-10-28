@@ -83,7 +83,7 @@ def api(req):
     """loom's piece API (POST /api/shuttle/run {argv}): relay, a bridge's relay-take (shuttle/relay.py),
     and a bridge's own agent's people: `people`, `offer-people` (shuttle/gates.py)."""
     argv = ((req.get("body") or {}).get("argv") if isinstance(req, dict) else None) or []
-    if isinstance(argv, list) and argv and argv[0] in ("people", "offer-people"):
+    if isinstance(argv, list) and argv and argv[0] in ("people", "offer-people", "routes", "offer-routes"):
         try:
             out = gates.api_answer(req.get("caller") or {}, argv)
         except (OSError, ValueError) as e:
@@ -133,8 +133,11 @@ def main(argv):
             print(json.dumps(signin_page(path)))
             return 0
         # Each agent's people document (its gates), a household owner's alone.
-        if path.startswith("people/") or path.startswith("offer/"):
-            pg = gates_page.page(path[len("people/"):]) if path.startswith("people/") else gates_page.offer_page(path[len("offer/"):])
+        if path.startswith(("people/", "offer/", "routes-offer/")) or path == "routes":
+            pg = (gates_page.page(path[len("people/"):]) if path.startswith("people/")
+                  else gates_page.offer_page(path[len("offer/"):]) if path.startswith("offer/")
+                  else gates_page.routes_offer_page(path[len("routes-offer/"):]) if path.startswith("routes-offer/")
+                  else gates_page.routes_page())
             print(json.dumps(pg if own is None else {"title": "Not found", "sections": []}))
             return 0
         out = loomui.page(loomui.View.of(inst), path, req.get("query"))

@@ -22,6 +22,9 @@ from pathlib import Path
 PIECE = "shuttle"
 PEOPLE = "people"     # owner: an agent's people document
 OFFERS = "offers"     # piece: a bridge's people.json, offered for the owner to accept
+ROUTES = "routes"     # owner: the household's route map, key HOUSEHOLD (loom bridges.md step 3)
+ROUTE_OFFERS = "route-offers"   # piece: a bridge's routes.json, offered (key: its agent)
+HOUSEHOLD = "household"
 REFRESH_S = 60
 
 
@@ -85,6 +88,19 @@ def api_answer(caller, argv, run_get=get, run_put=put):
     if not isinstance(caller, dict) or caller.get("kind") != "agent" or not isinstance(caller.get("agent"), str):
         return refuse(403, "a bridge asks for its own agent's people")
     agent = caller["agent"]
+    # The household's route map: every agent's bridge reads the same one.
+    if argv == ["routes"]:
+        doc, rev = run_get(ROUTES, HOUSEHOLD)
+        return {"status": 200, "body": {"exit": 0, "stdout": json.dumps({"doc": doc, "rev": rev}) + "\n", "stderr": ""}}
+    if len(argv) == 3 and argv[:2] == ["offer-routes", "--doc"]:
+        try:
+            doc = json.loads(argv[2])
+        except ValueError:
+            return refuse(400, "the offered document isn't JSON")
+        if not isinstance(doc, dict):
+            return refuse(400, "a route map is a JSON object")
+        run_put(ROUTE_OFFERS, agent, {"doc": doc, "at": time.time(), "from": caller.get("service") or caller.get("house") or "a bridge"})
+        return {"status": 200, "body": {"exit": 0, "stdout": "offered\n", "stderr": ""}}
     if argv == ["people"]:
         doc, rev = run_get(PEOPLE, agent)
         return {"status": 200, "body": {"exit": 0, "stdout": json.dumps({"doc": doc, "rev": rev}) + "\n", "stderr": ""}}
@@ -108,9 +124,10 @@ class People:
     people.json (offered to loom once). Refreshed at most every REFRESH_S; a failed read keeps the
     last good document. version() changes when the document does."""
 
-    def __init__(self, file, now=time.time, remote=None):
+    def __init__(self, file, now=time.time, remote=None, verb="people", offer="offer-people"):
         # The path, or a function giving it: an adapter's PEOPLE_FILE can be pointed elsewhere (its tests do).
         self._file = file if callable(file) else (lambda: file)
+        self.verb, self.offer = verb, offer
         self.now = now
         self.remote = remote if remote is not None else _remote_call
         self._doc, self._ver, self._at, self._offered = None, None, 0.0, False
@@ -127,7 +144,7 @@ class People:
         if self.now() - self._at >= REFRESH_S or self._doc is None:
             self._at = self.now()
             try:
-                got = self.remote(["people"])
+                got = self.remote([self.verb])
             except Exception as e:  # loom unreachable: keep what we have
                 print(f"people: loom unreachable ({e!r}); keeping what was loaded", flush=True)
                 if self._doc is not None:
@@ -143,9 +160,9 @@ class People:
         if got is not None and not self._offered:
             self._offered = True
             try:
-                self.remote(["offer-people", "--doc", json.dumps(doc)])
+                self.remote([self.offer, "--doc", json.dumps(doc)])
             except Exception as e:
-                print(f"people: offering people.json to loom failed ({e!r})", flush=True)
+                print(f"{self.verb}: offering {self.file.name} to loom failed ({e!r})", flush=True)
         return self._doc
 
     def version(self):
@@ -167,4 +184,9 @@ def _remote_call(argv):
     if body.get("exit", 1) != 0:
         raise OSError(body.get("stderr") or "shuttle's API refused")
     out = body.get("stdout") or ""
-    return json.loads(out) if argv == ["people"] else {"ok": True}
+    return json.loads(out) if argv in (["people"], ["routes"]) else {"ok": True}
+
+
+def Routes(file, **kw):
+    """The household's route map, as a bridge reads it: loom's once loom has it, else its routes.json (offered once)."""
+    return People(file, verb="routes", offer="offer-routes", **kw)

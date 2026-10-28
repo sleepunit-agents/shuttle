@@ -63,17 +63,22 @@ DISCORD_SEND = (INSTANCE.commands.get("send") or {}).get("discord")
 WORKDIR = INSTANCE.workdir   # the bodies' cwd
 # This shuttle's checkout and the agent's repo the bodies work in: stale ones are picked up when idle.
 UPGRADE = upgrade.Upgrader([Path(__file__).resolve().parent.parent, WORKDIR])
+ROUTES_FILE = INSTANCE.dir / "routes.json"
+
+
+# The household's route map: loom's (shuttle's store, `routes`) once an owner has saved it; routes.json until then.
+ROUTES_SRC = gates.Routes(lambda: ROUTES_FILE)
 
 
 def _instance_routes():
-    """routes.json beside the instance file, at start, for the instance ids
+    """The route map (loom's, else routes.json beside the instance file, at start, for the instance ids
     (t-1423 step 7: they live with the instance, not in this source). The
     per-tick routing reloads it; these need a restart. Missing or unreadable:
     no ids, so the bridge polls nothing rather than guessing."""
     try:
-        return json.loads((INSTANCE.dir / "routes.json").read_text())
+        return ROUTES_SRC.doc()
     except (OSError, ValueError) as e:
-        print(f"routes.json unreadable at start ({e!r}); no instance ids", flush=True)
+        print(f"routes unreadable at start ({e!r}); no instance ids", flush=True)
         return {}
 
 
@@ -184,7 +189,6 @@ PEOPLE = {}   # discord id -> the label a body reads: "Pat", "Kit (peer agent bo
 # count their own predecessors): PEER_TURNS_EACH spawns per thread for
 # peer-originated batches, reset by any allowed human message there (NOT just
 # routable ones — in a peer-primary venue the owner's messages route to nobody).
-ROUTES_FILE = INSTANCE.dir / "routes.json"
 # Guests (t-693, 2026-09-13): a guest is a human the owner introduced for ONE
 # purpose: a people.json person at tier 1 with {venues: [chan ids],
 # daily_spawns} (until t-1423, routes.json `guests`). A guest's message wakes a body only inside its venues
@@ -236,9 +240,9 @@ _ANY_MENTION_RE = re.compile(r"<@[!&]?\d+>")
 
 def load_routes():
     try:
-        return json.loads(ROUTES_FILE.read_text())
+        return ROUTES_SRC.doc()
     except (OSError, json.JSONDecodeError) as e:
-        print(f"routes.json unreadable ({e!r}); mentions-only everywhere", flush=True)
+        print(f"routes unreadable ({e!r}); mentions-only everywhere", flush=True)
         return {"channels": {}, "threads": {}, "bots": {SLUG: BOT_USER_ID}}
 
 

@@ -78,6 +78,7 @@ SECRETS = SLACK.get("secrets_env") or "slack.env"   # the secret's name (INSTANC
 PEOPLE_FILE = INSTANCE.dir / "people.json"
 PEOPLE_SRC = gates.People(lambda: PEOPLE_FILE)   # loom's copy when there is one; people.json until then
 ROUTES_FILE = INSTANCE.dir / "routes.json"
+ROUTES_SRC = gates.Routes(lambda: ROUTES_FILE)   # the household's route map: loom's once saved there, routes.json until then
 STATE_DIR = INSTANCE.state_dir("slack")
 STATE_FILE = STATE_DIR / "state.json"
 STATE_LOCK_FILE = STATE_DIR / "state.json.lock"
@@ -94,9 +95,9 @@ LOOM = INSTANCE.commands.get("loom")   # person cards (`loom person show`)
 
 
 def _instance_routes():
-    """routes.json beside the instance file, read at start ({} if missing)."""
+    """The route map (loom's, else routes.json beside the instance file), read at start ({} if missing)."""
     try:
-        return json.loads(ROUTES_FILE.read_text())
+        return ROUTES_SRC.doc()
     except (OSError, ValueError) as e:
         print(f"routes.json unreadable at start ({e!r})", flush=True)
         return {}
