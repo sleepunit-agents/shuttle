@@ -100,6 +100,22 @@ def api(req):
     return relay.api_answer(inst, _people_of(inst), req)
 
 
+def household_agents():
+    """The household's agents (loom's household.json), or every agent when it can't be read."""
+    home = os.environ.get("LOOM_HOME") or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "loom")
+    try:
+        with open(os.path.join(home, "household.json")) as f:
+            agents = json.load(f).get("agents") or []
+        return {a for a in agents if isinstance(a, str) and gates_page.AGENT.match(a)}
+    except (OSError, ValueError, AttributeError):
+        return _Everyone()
+
+
+class _Everyone:
+    def __contains__(self, _):
+        return True
+
+
 def agent_bridges_page(inst, agent, household_page):
     """One agent's Bridges: its people and channels; the house rules when these bridges are its."""
     sections = []
@@ -181,11 +197,17 @@ def main(argv):
         elif path == "":
             try:
                 agents = sorted(set(gates.list_keys(gates.PEOPLE)) | set(gates.list_keys(gates.OFFERS))
-                                | set(gates.list_keys(gates.CHANNELS)) | {inst.agent_slug})
+                                | set(gates.list_keys(gates.CHANNELS)) | {inst.agent_slug}
+                                | {x["page"].split("/", 1)[1] for x in gates_page.asks() if x["page"].startswith("channels/")})
+                loom_agents = household_agents()
                 # Each agent's people and channels are on its own Bridges tab: here, one link each.
                 people = [{"id": "people", "title": "People and channels", "side": True, "blocks": [
                     {"type": "text", "tone": "muted", "text": "Who each id is and where each agent answers: on each agent's own Bridges tab."},
-                    {"type": "list", "items": [{"text": f"{a}'s", "agent": a, "page": f"agent:{a}"} for a in agents]}]}]
+                    {"type": "list", "items": [
+                        # An agent loom has gets its own page; one only the route map knows (a peer bot) is checked here.
+                        {"text": f"{a}'s", "agent": a, "page": f"agent:{a}"} if a in loom_agents
+                        else {"text": f"{a}'s channels", "meta": "a peer bot, not one of loom's agents", "page": f"channels/{a}"}
+                        for a in agents]}]}]
             except (OSError, ValueError) as e:
                 people = [{"id": "people", "title": "People and channels", "side": True,
                            "blocks": [{"type": "text", "tone": "bad", "text": f"loom's store didn't answer: {e}"}]}]
