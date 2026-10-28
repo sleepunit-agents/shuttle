@@ -206,5 +206,40 @@ class Channels(unittest.TestCase):
                          "Two agents answer here")
 
 
+class ChannelsHardening(unittest.TestCase):
+    def setUp(self):
+        self.s = Store()
+
+    def test_a_malformed_offer_is_refused_and_never_breaks_the_page(self):
+        r = gates.api_answer({"kind": "agent", "agent": "kit"}, ["offer-routes", "--doc", json.dumps({"channels": {"c1": "x"}})],
+                             run_get=self.s.get, run_put=self.s.put)
+        self.assertEqual(r["status"], 400)
+        self.s.put(gates.ROUTE_OFFERS, "pip", {"doc": {"channels": ["nope"]}, "at": 1})
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": MAP, "at": 1})
+        self.assertEqual(sorted(a["page"] for a in gates_page.asks(get=self.s.get, keys=self.s.keys)), ["channels/kit", "channels/pip"])
+        gates_page.channels_page("kit", get=self.s.get, keys=self.s.keys)
+
+    def test_an_agents_own_bridge_copy_wins_and_its_extras_are_kept(self):
+        mine = json.loads(json.dumps(MAP))
+        mine["ignore"] = {"c7": 1}
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": MAP, "at": 1})
+        self.s.put(gates.ROUTE_OFFERS, "pip", {"doc": mine, "at": 1})
+        act = lambda f: gates_page.act("channels-accept", f, get=self.s.get, put=self.s.put, keys=self.s.keys)
+        self.assertFalse(act({"agent": "pip", "from": "kit", "offer_rev": "1"})["ok"], "pip's own bridge has a copy")
+        self.assertTrue(act({"agent": "pip", "from": "pip", "offer_rev": "1"})["ok"])
+        self.assertEqual(self.s.get(gates.CHANNELS, "pip")[0]["extra"]["ignore"], {"c7": 1})
+        # Saved from another's copy before its own bridge offered: keep the file until it's checked again.
+        self.s.put(gates.CHANNELS, "pip", {"answers": {"c2": "games"}}, if_rev=None)
+        self.assertTrue(act({"agent": "kit", "from": "kit", "offer_rev": "1"})["ok"])
+        self.assertIsNone(gates.routes_for("pip", self.s.get, self.s.keys))
+
+    def test_the_household_part_is_shown_before_its_saved(self):
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": MAP, "at": 1})
+        blocks = gates_page.channels_page("kit", get=self.s.get, keys=self.s.keys)["sections"][0]["blocks"]
+        d = [b for b in blocks if b["type"] == "details"]
+        self.assertEqual(len(d), 1)
+        self.assertIn("Webhook peers", [i["label"] for i in d[0]["blocks"][0]["items"]])
+
+
 if __name__ == "__main__":
     unittest.main()

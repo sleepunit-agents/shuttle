@@ -96,11 +96,14 @@ def _sources(agent, get, keys):
     whose file says something about `agent`."""
     out = {}
     for b in sorted(keys(gates.ROUTE_OFFERS)):
-        offer, rev = get(gates.ROUTE_OFFERS, b)
-        if offer and isinstance(offer.get("doc"), dict):
-            household, parts = gates.split(offer["doc"], b)
-            if agent in parts:
-                out[b] = (rev, parts[agent], household, offer["doc"])
+        try:   # one bridge's odd file must not take the page down
+            offer, rev = get(gates.ROUTE_OFFERS, b)
+            if offer and isinstance(offer.get("doc"), dict) and gates.routes_problem(offer["doc"]) is None:
+                household, parts = gates.split(offer["doc"], b)
+                if agent in parts:
+                    out[b] = (rev, parts[agent], household, offer["doc"])
+        except (AttributeError, TypeError, ValueError):
+            continue
     return out
 
 
@@ -120,9 +123,16 @@ def channel_blocks(agent, part, names=None):
               {"type": "text", "tone": "muted", "text": f"{agent} answers nowhere without a mention: only when someone mentions it."}]
     never = (part.get("extra") or {}).get("ignore") or {}
     kv = [{"label": "Its bot", "value": str(part.get("bot") or "—")},
+          {"label": "Its bot's role", "value": str(part.get("bot_role") or "—")},
           {"label": "Its alerts go to", "value": "#" + str(names.get(part.get("notify")) or part.get("notify")) if part.get("notify") else "—"}]
+    if part.get("threads"):
+        kv.append({"label": "Threads it answers in", "value": str(len(part["threads"]))})
     if never:
         kv.append({"label": "Never answers in", "value": _cut(", ".join("#" + str(names.get(c) or c) for c in never))})
+    for k, v in sorted((part.get("extra") or {}).items()):
+        if k != "ignore":
+            kv.append({"label": f"Its bridge's {k}", "value": _cut(", ".join("#" + str(names.get(c) or c) for c in v)
+                                                                   if isinstance(v, (dict, list)) else v)})
     blocks.append({"type": "kv", "items": kv})
     return blocks
 
@@ -239,6 +249,14 @@ def channels_page(agent, get=gates.get, keys=gates.list_keys):
     if note:
         blocks.append({"type": "kv", "items": [{"label": f"{shown_by}'s copy last updated", "value": note}]})
     first = household is None
+    if first:   # saved with it: shown first
+        kv = [{"label": "Discord server", "value": str(hh.get("guild") or "—")},
+              {"label": "Channel names", "value": str(len(hh.get("channel_names") or {}))},
+              {"label": "Webhook peers", "value": _cut(", ".join(str(k) for k in (hh.get("webhook_peers") or {}) if not str(k).startswith("_")) or "—")},
+              {"label": "Guests", "value": str(len([k for k in (hh.get("guests") or {}) if not str(k).startswith("_")]))},
+              {"label": "Peer turns each", "value": str(hh.get("peer_turns_each") if hh.get("peer_turns_each") is not None else "no cap")},
+              {"label": "Household alerts", "value": _cut(", ".join(f"{k}: #{(hh.get('channel_names') or {}).get(v) or v}" for k, v in (hh.get("notify") or {}).items())) or "—"}]
+        blocks.append({"type": "details", "summary": "Also saved: the household's part of this file", "blocks": [{"type": "kv", "items": kv}]})
     blocks.append({"type": "form", "action": "channels-accept", "submit": f"Use these as {agent}'s channels", "fields": [],
                    "note": "Saves exactly what's above into loom" + (
                        ", with the household's part of the same file (the Discord server, channel names, webhook peers)"
@@ -262,9 +280,12 @@ def asks(get=gates.get, keys=gates.list_keys):
     saved = set(keys(gates.CHANNELS))
     wanted = set()
     for b in keys(gates.ROUTE_OFFERS):
-        offer, _ = get(gates.ROUTE_OFFERS, b)
-        if offer and isinstance(offer.get("doc"), dict):
-            wanted |= set(gates.split(offer["doc"], b)[1])
+        try:
+            offer, _ = get(gates.ROUTE_OFFERS, b)
+            if offer and isinstance(offer.get("doc"), dict) and gates.routes_problem(offer["doc"]) is None:
+                wanted |= set(gates.split(offer["doc"], b)[1])
+        except (AttributeError, TypeError, ValueError):
+            continue
     for a in sorted(wanted - saved):
         out.append({"text": f"Check {a}'s channels", "meta": "where it answers without a mention, still in a bridge's file",
                     "page": f"channels/{a}", "label": "Check"})
@@ -303,6 +324,9 @@ def act(action, fields, get=gates.get, put=gates.put, keys=gates.list_keys):
         household, parts = gates.split(offer["doc"], src)
         if agent not in parts:
             return {"ok": False, "message": f"That file says nothing about {agent}."}
+        if src != agent and get(gates.ROUTE_OFFERS, agent)[0] is not None:
+            # Its own bridge has a copy: that one carries its own extras (where it never answers, ...).
+            return {"ok": False, "message": f"{agent}'s own bridge has offered its file: use that one."}
         if get(gates.ROUTES, gates.HOUSEHOLD)[0] is None:
             put(gates.ROUTES, gates.HOUSEHOLD, household, if_rev=0)
         put(gates.CHANNELS, agent, parts[agent], if_rev=0)
