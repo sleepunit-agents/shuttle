@@ -380,11 +380,16 @@ def _bridge_section(view, b):
               else {"label": "Pickup, 24h", "value": "none"})
     stats = [
         {"label": "State", "value": state, "detail": f"checked {_ago(now - b['at'])} ago", "tone": tone},
-        {"label": "Bodies", "value": f"{slots.get('used', 0)}/{slots.get('cap', '?')}"},
+        {"label": "Bodies", "value": f"{slots.get('used', 0)}/{slots.get('cap', '?')}", "detail": _bodies_detail(b)},
         {"label": "Today", "value": _plural(st["turns"], "turn"), "detail": f"{st['sent']} sent"},
         pickup,
     ]
-    blocks = [{"type": "stats", "items": stats}, {"type": "text", "text": _now_line(view, b)}]
+    # What's happening now: a row per conversation it's in, not a sentence; idle says so on the Bodies tile.
+    blocks = [{"type": "stats", "items": stats}]
+    if b["dark"]:
+        blocks.append({"type": "text", "tone": "bad", "text": _now_line(view, b)})
+    elif _now_rows(b):
+        blocks.append({"type": "list", "items": _now_rows(b)})
     note = _socket_note(st["socket"], b["name"])
     if note:
         blocks.append({"type": "text", "text": note, "tone": "muted"})
@@ -392,6 +397,35 @@ def _bridge_section(view, b):
     if b["dark"]:
         sec["tone"] = "bad"
     return sec
+
+
+def _bodies_detail(b):
+    """The Bodies tile's line: idle and nobody waiting, or how many are talking and waiting."""
+    if b["dark"]:
+        return "not known"
+    snap = b["snap"]
+    talking, waiting = len(snap.get("talking") or []), len(snap.get("waiting") or [])
+    if not talking and not waiting:
+        return "idle, nobody waiting"
+    return ", ".join(x for x in (f"{talking} talking" if talking else "", f"{waiting} waiting" if waiting else "") if x)
+
+
+def _now_rows(b):
+    """A row per conversation the bridge is in now: where and with whom, how long, queued or stalled."""
+    rows = []
+    for t in b["snap"].get("talking") or []:
+        who = ", ".join(t.get("who") or []) or "nobody named"
+        bits = [f"active {_ago(t.get('active_s') or 0)}"]
+        if t.get("queued"):
+            bits.append(f"{t['queued']} queued")
+        if t.get("stalled"):
+            bits.append("stalled")
+        rows.append({"text": f"{_where(b['name'], t.get('venue'))} with {who}", "meta": " · ".join(bits), **({"tone": "warn"} if t.get("stalled") else {})})
+    for w in b["snap"].get("waiting") or []:
+        who = ", ".join(w.get("who") or []) or "nobody named"
+        why = {"slots_full": "every body is busy"}.get(w.get("reason"), w.get("reason") or "")
+        rows.append({"text": f"{_where(b['name'], w.get('venue'))} with {who}", "meta": "waiting" + (f": {why}" if why else ""), "tone": "warn"})
+    return rows
 
 
 def _now_line(view, b):

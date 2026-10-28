@@ -243,13 +243,19 @@ class Page(Fixture):
         stats, now = p["sections"][0]["blocks"][:2]
         self.assertEqual(stats["items"], [
             {"label": "State", "value": "running", "detail": "checked 4s ago", "tone": "ok"},
-            {"label": "Bodies", "value": "1/5"},
+            {"label": "Bodies", "value": "1/5", "detail": "1 talking, 1 waiting"},
             {"label": "Today", "value": "2 turns", "detail": "1 sent"},
             {"label": "Pickup, 24h", "value": "median 24s", "detail": "max 28s"},
         ])
-        self.assertEqual(now, {"type": "text",
-                               "text": "Talking now in #general with Pat (active 4s, 2 queued). 1 waiting."})
+        # Now: a row per conversation, talking or waiting (not a sentence under the tiles).
+        self.assertEqual(now, {"type": "list", "items": [
+            {"text": "#general with Pat", "meta": "active 4s · 2 queued"},
+            {"text": "#b with Sam", "meta": "waiting: every body is busy", "tone": "warn"}]})
         self.assertEqual(len(p["sections"][0]["blocks"]), 2)   # no socket, no note
+        # Idle: the Bodies tile says so, and nothing hangs under the tiles.
+        talk = self.page("bridge/talk")["sections"][0]
+        self.assertEqual(talk["blocks"][0]["items"][1]["detail"], "idle, nobody waiting")
+        self.assertNotIn("list", [x["type"] for x in talk["blocks"]])
         self.assertEqual([i["text"] for i in p["sections"][1]["blocks"][0]["items"]], ["Pat"], "only its own conversations")
 
     def test_socket_rotation_note(self):
