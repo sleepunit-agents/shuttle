@@ -168,8 +168,9 @@ def _slug_ok(slug):
 class View:
     """One read of the board, at `now`. Built once per command."""
 
-    def __init__(self, now_dir, now=None, rules=None, people_file=None, agent_name=None):
+    def __init__(self, now_dir, now=None, rules=None, people_file=None, agent_name=None, agent_slug=None):
         self.now = time.time() if now is None else now
+        self.agent_slug = agent_slug
         self.now_dir = Path(now_dir)
         self.rules = rules
         self.people_file = people_file
@@ -188,7 +189,7 @@ class View:
         rules = {"guest_deny": list(inst.guest_deny), "always_deny": list(inst.always_deny),
                  "preferred_model": inst.preferred_model}
         return cls(inst.now_dir, now=now, rules=rules,
-                   people_file=inst.dir / "people.json", agent_name=inst.agent_name)
+                   people_file=inst.dir / "people.json", agent_name=inst.agent_name, agent_slug=inst.agent_slug)
 
     def stats(self):
         """The last 24h of events, folded once: per bridge (turns and sends
@@ -235,6 +236,17 @@ class View:
 # ---------------------------------------------------------------- the manifest
 
 
+def owner_agents(caller):
+    """An owner caller's agents (loom's docs/specs/owners.md): None for a household owner, or a
+    caller loom didn't name, else the list. Only an agent owner is ever narrowed."""
+    if not isinstance(caller, dict) or caller.get("kind") != "owner":
+        return None
+    a = caller.get("agents")
+    if a is None or a == "*":
+        return None
+    return [x for x in a if isinstance(x, str)] if isinstance(a, list) else []
+
+
 def manifest(view):
     live = [b for b in view.bridges if not b["dark"]]
     dark = [b for b in view.bridges if b["dark"]]
@@ -242,8 +254,9 @@ def manifest(view):
             "tone": "bad" if dark else "ok", "page": ""}
     asks = [{"text": f"{_title(b['name'])} bridge is dark since {_clock(b['at'], view.now)}",
              "meta": f"no word from it for {_ago(view.now - b['at'])}",
-             "page": "", "label": "Look"} for b in dark][:10]
-    return {"v": 2, "tab": {"label": "Bridges"}, "tile": tile, "asks": asks}
+             "page": "", "label": "Look", **({"agent": view.agent_slug} if view.agent_slug else {})} for b in dark][:10]
+    # owners: 2: an agent owner sees these bridges only if they own the agent they serve.
+    return {"v": 2, "owners": 2, "tab": {"label": "Bridges"}, "tile": tile, "asks": asks}
 
 
 def _activity(view):

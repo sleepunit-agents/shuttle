@@ -432,6 +432,26 @@ class Entry(unittest.TestCase):
         m = json.loads(r.stdout)
         self.assertEqual((m["v"], m["tab"]["label"], m["tile"]["value"]), (2, "Bridges", "1 live"))
 
+    def test_an_agent_owner_sees_these_bridges_only_if_they_own_the_agent(self):
+        # loom's docs/specs/owners.md: the instance serves agent "a".
+        page = lambda caller: json.loads(self.run_tool("ui", "page", "--json", stdin=json.dumps({"path": "", "caller": caller})).stdout)
+        theirs = page({"kind": "owner", "who": "loren", "agents": ["a"]})
+        self.assertIn("Robin", theirs["intro"])
+        self.assertNotIn("house-rules", [x["id"] for x in theirs["sections"]])
+        self.assertNotIn("signin", [x["id"] for x in theirs["sections"]])
+        other = page({"kind": "owner", "who": "loren", "agents": ["b"]})
+        self.assertIn("isn't one of your agents", json.dumps(other))
+        self.assertNotIn("Pat Smith", json.dumps(other))
+        signin = json.loads(self.run_tool("ui", "page", "--json", stdin=json.dumps({"path": "signin", "caller": {"kind": "owner", "agents": ["a"]}})).stdout)
+        self.assertIn("household owner's", json.dumps(signin))
+        acted = json.loads(self.run_tool("ui", "act", "--json", stdin=json.dumps({"action": "signin-start", "fields": {"harness": "claude"}, "caller": {"kind": "owner", "agents": ["a"]}})).stdout)
+        self.assertFalse(acted["ok"])
+        # The manifest says it understands agent owners, and its asks name the agent.
+        m = json.loads(self.run_tool("ui", "--json").stdout)
+        self.assertEqual(m["owners"], 2)
+        # A household owner's page, as before.
+        self.assertIn("house-rules", [x["id"] for x in page({"kind": "owner", "who": "pat", "agents": "*"})["sections"]])
+
     def test_ui_page_json_reads_the_request_on_stdin(self):
         r = self.run_tool("ui", "page", "--json", stdin=json.dumps({"path": "", "query": {}}))
         self.assertEqual(r.returncode, 0, r.stderr)

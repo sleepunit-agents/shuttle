@@ -359,6 +359,34 @@ class Subscriptions(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bad()
 
+    def test_an_agent_owner_gets_their_agents_fuel_read_only(self):
+        # loom's docs/specs/owners.md: Loren owns robin, who runs on main → spare.
+        def tool(*args, stdin="{}"):
+            r = subprocess.run([sys.executable, str(ROOT / "tools/loom-subscriptions"), *args], input=stdin,
+                               capture_output=True, text=True, env=os.environ)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout)
+        loren = {"kind": "owner", "who": "loren", "agents": ["robin"]}
+        self.assertEqual(tool("ui", "--json")["owners"], 2)
+        page = tool("ui", "page", "--json", stdin=json.dumps({"path": "", "caller": loren}))
+        self.assertEqual(page["title"], "Fuel")
+        text = json.dumps(page, ensure_ascii=False)
+        self.assertIn("The household's Max → The spare", text)
+        self.assertNotIn("ChatGPT", text)
+        self.assertNotIn("signin-start", text)
+        act = lambda action, fields: tool("ui", "act", "--json", stdin=json.dumps({"action": action, "fields": fields, "caller": loren}))
+        self.assertFalse(act("check", {"sub": "chatgpt"})["ok"])
+        self.assertFalse(act("assign", {"agent": "robin", "order": "chatgpt"})["ok"])
+        self.assertFalse(act("signin-start", {"sub": "main"})["ok"])
+        self.assertEqual(subs.load()["assign"]["robin"], ["main", "spare"])
+        from importlib.machinery import SourceFileLoader
+        tool_mod = SourceFileLoader("loom_subscriptions_tool2", str(ROOT / "tools/loom-subscriptions")).load_module()
+        ran = []
+        r = tool_mod.api_answer(subs.load(), {"caller": {"kind": "owner", "agents": ["someone"]}, "path": "run", "body": {"argv": ["issue", "robin", "anthropic"]}},
+                                lambda argv: ran.append(argv) or (0, "", ""))
+        self.assertEqual(r["status"], 403)
+        self.assertEqual(ran, [])
+
     def test_the_page_and_its_actions(self):
         def tool(*args, stdin="{}"):
             r = subprocess.run([sys.executable, str(ROOT / "tools/loom-subscriptions"), *args], input=stdin,
