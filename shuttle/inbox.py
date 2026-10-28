@@ -32,14 +32,23 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-_configured = {"inbox_dir": None}
+_configured = {"inbox_dir": None, "remote": None}
 
 
-def configure(inbox_dir=None):
+def configure(inbox_dir=None, remote=None):
     """Set the inbox dir (the instance's inbox_dir); None leaves it as it was.
-    The env var still wins."""
+    The env var still wins. `remote` (shuttle/bodies.py RemoteInbox): the bridge's
+    bodies run in another house, so its calls go there; the hook's never do."""
     if inbox_dir:
         _configured["inbox_dir"] = Path(inbox_dir)
+    if remote is not None:
+        _configured["remote"] = remote
+
+
+def _remote(name):
+    """The remote backend's `name`, when the bridge's bodies are elsewhere; else None."""
+    r = _configured["remote"]
+    return getattr(r, name) if r is not None else None
 
 
 def base():
@@ -89,6 +98,8 @@ def _append_jsonl(p, items):
 
 def open_inbox(aid, venue, chan, bridge):
     """Create the inbox for a body the bridge just spawned."""
+    if _remote("open_inbox"):
+        return _remote("open_inbox")(aid, venue, chan, bridge)
     d = path_for(aid)
     base().mkdir(mode=0o700, parents=True, exist_ok=True)
     d.mkdir(mode=0o700, exist_ok=True)
@@ -100,6 +111,8 @@ def open_inbox(aid, venue, chan, bridge):
 
 
 def is_open(aid):
+    if _remote("is_open"):
+        return _remote("is_open")(aid)
     d = path_for(aid)
     return d.is_dir() and not (d / "closed").exists()
 
@@ -108,6 +121,8 @@ def put(aid, items, now=None):
     """Bridge side: queue items ({"id", "text", "msg"}) for the body, stamped
     with "t" (hand-over time). False if the inbox is missing or closed (the
     caller then holds them as before)."""
+    if _remote("put"):
+        return _remote("put")(aid, items, now)
     d = path_for(aid)
     if not d.is_dir():
         return False
@@ -154,6 +169,8 @@ def close(aid):
     was still pending (the caller gives it to a fresh body). Pending stays on
     disk until remove(), so a bridge that dies before saving its state can
     close again after restart and get the same items back."""
+    if _remote("close"):
+        return _remote("close")(aid)
     d = path_for(aid)
     if not d.is_dir():
         return []
@@ -172,11 +189,15 @@ def all_ids():
 
 def delivered(aid):
     """What the hook has handed over so far."""
+    if _remote("delivered"):
+        return _remote("delivered")(aid)
     return _read_jsonl(path_for(aid) / "delivered.jsonl")
 
 
 def meta(aid):
     """meta.json as a dict ({} if missing or not an object: it is body-writable)."""
+    if _remote("meta"):
+        return _remote("meta")(aid)
     try:
         d = json.loads((path_for(aid) / "meta.json").read_text())
     except (OSError, ValueError):
@@ -185,6 +206,8 @@ def meta(aid):
 
 
 def remove(aid):
+    if _remote("remove"):
+        return _remote("remove")(aid)
     shutil.rmtree(path_for(aid), ignore_errors=True)
 
 
@@ -198,6 +221,8 @@ def sweep(bridge, owned8, gc, now=None):
     never touched; a dir with no readable meta (a stray, or one being created
     right now) goes only once it is STRAY_S old. Returns the strays removed
     (not in gc), for the caller to log."""
+    if _remote("sweep"):
+        return _remote("sweep")(bridge, owned8, gc, now)
     now = time.time() if now is None else now
     strays = []
     for a8 in all_ids():

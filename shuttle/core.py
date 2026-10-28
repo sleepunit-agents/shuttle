@@ -149,10 +149,14 @@ def last_timeline(cfg, aid):
 
 
 def _sent_lines(cfg):
+    """The send tool's log: this house's, and (bodies in the agent's house, shuttle/bodies.py)
+    what their host reports of theirs."""
     try:
-        return cfg.sent_log.read_text().splitlines()[-2000:]
+        lines = cfg.sent_log.read_text().splitlines()[-2000:]
     except OSError:
-        return []
+        lines = []
+    remote = getattr(cfg.runner, "sent_lines", None)
+    return lines + (remote() if remote else [])
 
 
 def _posted_by(job, aid):
@@ -389,8 +393,10 @@ def drop_inner(b, state, aid, rec, retry, ended):
     The inbox dir is only closed here and queued in state["inbox_gc"]; it is
     removed next tick, after this state (with the leftovers) has been saved."""
     try:
-        delivered = b.inbox.delivered(aid)
+        # Closed first: after close nothing more is handed over, so what's delivered is final
+        # (a body in another house is closed there too before close returns, shuttle/bodies.py).
         pending_ids = {it.get("id") for it in b.inbox.close(aid)}
+        delivered = b.inbox.delivered(aid)
     except Exception as e:   # can't tell what it handled: hand everything on (dupes beat loss)
         print(f"inbox close {aid[:8]}: {e!r}", file=sys.stderr, flush=True)
         delivered, pending_ids = [], {b.msg_key(m) for m in rec.get("handed_msgs", [])}
@@ -533,9 +539,13 @@ def settle_unconfirmed(b, state, retries):
     retried. Either way the batch is no longer left unanswered."""
     held = state.get("unconfirmed") or []
     owned = state.setdefault("owned", {})
+    still = []
     for u in held:
         rec = {k: v for k, v in u.items() if k not in ("handle", "since")}
         ids = b.runner.find(u.get("handle") or {}, set(owned))
+        if not ids and b.runner.undecided(u.get("handle") or {}):
+            still.append(u)   # its body host is still starting it (shuttle/bodies.py)
+            continue
         if len(ids) == 1:
             aid = next(iter(ids))
             owned[aid] = {**rec, "idle_since": 0, "spawned_at": u.get("since", 0)}
@@ -543,8 +553,9 @@ def settle_unconfirmed(b, state, retries):
         else:
             print(f"retrying {b.rec_label(rec)}: {NEVER_STARTED}", flush=True)
             retries.append({**rec, "why": NEVER_STARTED})
-    state["unconfirmed"] = []
-    state.pop("unconfirmed_paged", None)
+    state["unconfirmed"] = still
+    if not still:
+        state.pop("unconfirmed_paged", None)
 
 
 def reap_and_count(b, state):

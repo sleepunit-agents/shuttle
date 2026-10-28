@@ -59,6 +59,20 @@ def put(collection, key, doc, if_rev=None):
     return json.loads(r.stdout)["rev"]
 
 
+def delete(collection, key):
+    r = _store("del", collection, key)
+    if r.returncode not in (0, 3):
+        raise OSError(f"loom store: {r.stderr.strip()[:200]}")
+
+
+def docs(collection, prefix):
+    """[(key, doc)] of a collection's documents under a key prefix."""
+    r = _store("list", collection, "--prefix", prefix, "--limit", "1000")
+    if r.returncode != 0:
+        raise OSError(f"loom store: {r.stderr.strip()[:200]}")
+    return [(d["key"], d.get("doc")) for d in json.loads(r.stdout or "[]")]
+
+
 def list_keys(collection):
     r = _store("list", collection)
     if r.returncode != 0:

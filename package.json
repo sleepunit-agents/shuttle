@@ -32,6 +32,10 @@
       },
       "route-offers": {
         "writers": "piece"
+      },
+      "bodies": {
+        "writers": "agent",
+        "history": false
       }
     }
   }
