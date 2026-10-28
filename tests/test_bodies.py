@@ -68,7 +68,14 @@ class Harness:
     def claim(self, handle, exclude):
         return {handle} - set(exclude)
 
+    def find(self, handle, exclude):
+        return set()
+
+    fail_list = False
+
     def list(self, strict=False):
+        if self.fail_list:
+            return None if strict else []
         return [{"id": a, "status": b["status"]} for a, b in self.bodies.items()]
 
     def stop(self, aid):
@@ -122,7 +129,7 @@ class Bodies(unittest.TestCase):
         self.assertIsNone(self.runner.list(strict=True), "no host yet: can't tell, never 'every body is gone'")
         self.beat()
         h = self.runner.start("brief\nhello", "model-y", ["WebFetch"], {"SHUTTLE_SCOPE": "field", "SECRET_TOKEN": "x"}, "/elsewhere")
-        self.assertEqual(self.runner.find(h, set()), set(), "not started until the host's next beat")
+        self.assertEqual(self.runner._look(h, set())[0], set(), "not started until the host's next beat")
         self.beat()
         (aid,) = self.runner.find(h, set())
         s = self.harness.started[0]
@@ -194,7 +201,56 @@ class Bodies(unittest.TestCase):
         h = self.runner.start("brief\nnew words", "m", [], None, "/w")
         self.beat()
         self.assertEqual(self.runner.find(h, set()), set())
+        self.beat()
         self.assertEqual(self.store.docs("bodies", "kit/discord-bodies/req/"), [])
+
+    def test_a_launch_given_up_on_is_never_started_late_and_stopped_if_it_was(self):
+        self.beat()
+        h = self.runner.start("brief", "m", [], None, "/w")
+        self.runner.find(h, set())   # the bridge settles it as never started, before the host got to it
+        self.beat()
+        self.assertEqual(self.harness.started, [], "withdrawn before it started: never started")
+        h = self.runner.start("brief", "m", [], None, "/w")
+        self.beat()   # started now, but the bridge already gave up and retried
+        self.store.put("bodies", f"kit/discord-bodies/req/{h['rid']}", {"withdrawn": True, "at": self.clock.t})
+        self.beat()
+        self.assertEqual(len(self.harness.stopped), 1, "a body nobody will claim is stopped")
+        self.assertEqual(self.store.docs("bodies", "kit/discord-bodies/req/"), [])
+
+    def test_a_failed_read_or_a_restart_is_cant_tell_never_every_body_gone(self):
+        self.beat()
+        h = self.runner.start("brief", "m", [], None, "/w")
+        self.beat()
+        (aid,) = self.runner.find(h, set())
+        self.beat()
+        self.harness.fail_list = True
+        self.beat()
+        self.harness.fail_list = False
+        self.beat()
+        self.assertEqual(self.runner.list(strict=True), [{"id": aid, "status": "busy"}], "one failed read forgets nothing")
+        # A restart while loom can't be read: no report until it can read its last one back.
+        self.host = self.new_host()
+        real = self.host.wire.call
+        self.host.wire.call = lambda argv: (_ for _ in ()).throw(OSError("loom down"))
+        self.beat()
+        self.host.wire.call = real
+        self.beat()
+        self.assertEqual(self.runner.list(strict=True), [{"id": aid, "status": "busy"}])
+        # A body that ended (killed, not reaped): what its death is judged on stays reported.
+        (self.dir / "sent.log").write_text(f"1001 {aid[:8]} c1 42\n")
+        del self.harness.bodies[aid]
+        self.beat()
+        self.assertEqual(self.runner.list(strict=True), [])
+        self.assertIsNotNone(self.runner.last_entry(aid))
+        self.assertEqual(self.runner.sent_lines(), [f"1001 {aid[:8]} c1 42"])
+
+    def test_a_malformed_report_is_cant_tell_not_a_crash(self):
+        for bad in ({"at": "soon"}, {"at": 1000, "bodies": []}, {"at": 1000, "bodies": {"x": {"quiet_s": "q"}}},
+                    {"at": 1000, "done": {"r": "x"}}, ["not", "a", "dict"]):
+            bodies._SNAP.clear()
+            self.store.put("bodies", "kit/discord-bodies/host", bad)
+            self.assertIsNone(self.runner.list(strict=True), bad)
+            self.assertEqual(self.runner.quiet_s("x"), 0.0)
 
     def test_each_agent_reaches_only_its_own_keys_and_each_service_only_its_part(self):
         req = ["bodies", "put", "discord-bodies/req/0123456789abcdef", "--doc", json.dumps({"prompt": "p"})]

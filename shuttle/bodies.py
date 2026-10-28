@@ -31,6 +31,7 @@ COLLECTION = "bodies"
 STALE_S = 90          # a host snapshot older than this: no host (the bridge then can't tell)
 SYNC_S = 2            # the host's pace
 REQ_TTL_S = 300       # a request older than this was given up on by its bridge
+ENDED_S = 900         # how long an ended body's last entry and sends stay reported (its death is judged on them)
 MAX_TEXT = 4000       # a last entry's text, as reported
 SENT_LINES = 300      # the tail of the house's sent log, as reported
 SUB = re.compile(r"^[a-z][a-z0-9-]{0,39}/[a-z][a-z0-9-]{0,39}/(host|req/[0-9a-f]{16}|stop/[A-Za-z0-9-]{1,64}|inbox/[A-Za-z0-9-]{1,16})$")
@@ -162,14 +163,41 @@ def _api(argv):
 _SNAP = {}   # profile -> (fetched_at, snapshot): the bridge builds a runner per call, the cache outlives it
 
 
+def _valid(snap):
+    """The host's report, if it has the shape the bridge reads; else None ("can't tell"). Anything
+    in the host's house can write it, so a malformed one must never crash a tick."""
+    if not isinstance(snap, dict):
+        return None
+    try:
+        float(snap.get("at"))
+    except (TypeError, ValueError):
+        return None
+    for k in ("bodies", "ended", "done", "delivered", "acked"):
+        if not isinstance(snap.get(k, {}), dict):
+            return None
+    for b in list((snap.get("bodies") or {}).values()) + list((snap.get("ended") or {}).values()):
+        if not isinstance(b, dict) or not isinstance(b.get("last") or {}, dict):
+            return None
+        try:
+            float(b.get("quiet_s") or 0)
+        except (TypeError, ValueError):
+            return None
+    if not all(isinstance(v, list) for v in (snap.get("done") or {}).values()) or \
+            not all(isinstance(v, list) for v in (snap.get("delivered") or {}).values()) or \
+            not isinstance(snap.get("sent") or [], list) or not isinstance(snap.get("inboxes") or [], list):
+        return None
+    return snap
+
+
 class RemoteRunner(runner_mod.Runner):
     """A runner whose bodies run in the agent's house, through its body host.
 
     What the host reports is a snapshot at most SYNC_S old; the bridge reads it
-    as it reads `claude agents`: a stale or missing one is "can't tell" (list
-    strict -> None), never "every body is gone"."""
+    as it reads `claude agents`: a stale, missing or malformed one is "can't tell"
+    (list strict -> None), never "every body is gone". A launch the bridge gives up
+    on is withdrawn, so the host never starts it late (and stops it if it had)."""
 
-    CLAIM_POLLS = 20   # one a second: the host's beat, a house start is the bridge's to wait out
+    CLAIM_POLLS = 45   # one a second: the host takes asks one at a time, each up to its own claim
     REFRESH_S = 1.0
 
     def __init__(self, wire, policy, time=time, secrets=_secrets, model=None):
@@ -184,17 +212,18 @@ class RemoteRunner(runner_mod.Runner):
         at, snap = _SNAP.get(self.wire.profile, (0.0, None))
         if fresh or snap is None or self.time.time() - at >= self.REFRESH_S:
             try:
-                snap = self.wire.get("host")
+                snap = _valid(self.wire.get("host"))
             except Exception as e:
                 print(f"body host: can't read its report ({e!r})", flush=True)
                 snap = None
             _SNAP[self.wire.profile] = (self.time.time(), snap)
-        if not isinstance(snap, dict) or self.time.time() - float(snap.get("at") or 0) > STALE_S:
+        if snap is None or self.time.time() - float(snap["at"]) > STALE_S:
             return None
         return snap
 
     def _body(self, aid):
-        return ((self._snap() or {}).get("bodies") or {}).get(aid) or {}
+        snap = self._snap() or {}
+        return (snap.get("bodies") or {}).get(aid) or (snap.get("ended") or {}).get(aid) or {}
 
     def host_up(self):
         return self._snap() is not None
@@ -210,7 +239,8 @@ class RemoteRunner(runner_mod.Runner):
         return self.policy.working(status)
 
     def resolve_model(self):
-        return (self._snap() or {}).get("model") or self._model
+        m = (self._snap() or {}).get("model")
+        return m if isinstance(m, str) and m else self._model
 
     def start(self, prompt, model, deny, env, cwd):
         rid = self.secrets.token_hex(8)
@@ -219,23 +249,40 @@ class RemoteRunner(runner_mod.Runner):
                                      "env": extra, "at": self.time.time()})
         return {"rid": rid}
 
-    def claim(self, handle, exclude):
-        for _ in range(self.CLAIM_POLLS):
-            self.time.sleep(1)
-            ids = self.find(handle, exclude, fresh=True)
-            if ids:
-                return ids
-        return set()
+    def _withdraw(self, rid):
+        # The prompt goes with it; a host that started it anyway stops what it started.
+        try:
+            self.wire.put(f"req/{rid}", {"withdrawn": True, "at": self.time.time()})
+        except Exception as e:
+            print(f"body host: couldn't withdraw request {rid} ({e!r})", flush=True)
 
-    def find(self, handle, exclude, fresh=False):
+    def _look(self, handle, exclude, fresh=False):
         rid = handle.get("rid")
         done = (self._snap(fresh) or {}).get("done") or {}
-        ids = set(done.get(rid) or ()) - set(exclude)
-        if rid in done:   # started, or tried and never showed: either way the host is done with it
+        ids = {str(a) for a in done.get(rid) or ()} - set(exclude)
+        if ids:
             try:   # the request carried the prompt: gone once it's started
                 self.wire.delete(f"req/{rid}")
             except Exception:
                 pass
+        return ids, rid in done
+
+    def claim(self, handle, exclude):
+        for _ in range(self.CLAIM_POLLS):
+            self.time.sleep(1)
+            ids, _ = self._look(handle, exclude, fresh=True)
+            if ids:
+                return ids
+        if self.host_up():   # the host answers and never started it: the bridge retries it, so withdraw it
+            self._withdraw(handle.get("rid"))
+        return set()
+
+    def find(self, handle, exclude):
+        """One look (the bridge settling a launch it couldn't confirm). A miss while the host
+        answers is final: the bridge retries the batch, so the request is withdrawn."""
+        ids, _ = self._look(handle, exclude, fresh=True)
+        if not ids and self.host_up():
+            self._withdraw(handle.get("rid"))
         return ids
 
     def list(self, strict=False):
@@ -279,11 +326,14 @@ class RemoteInbox:
     """shuttle/inbox.py's bridge-side calls, kept in the store for a body in another house.
     The host mirrors each into its own inbox dir, where the body's hook reads it."""
 
+    CLOSE_WAIT_S = 8   # how long close() waits for the host to have closed it too
+
     def __init__(self, wire, runner):
         self.wire, self.runner = wire, runner
 
     def _doc(self, aid):
-        return self.wire.get(f"inbox/{str(aid)[:8]}")
+        d = self.wire.get(f"inbox/{str(aid)[:8]}")
+        return d if isinstance(d, dict) else None
 
     def open_inbox(self, aid, venue, chan, bridge):
         self.wire.put(f"inbox/{str(aid)[:8]}", {"meta": {"venue": venue, "chan": chan, "bridge": bridge},
@@ -302,17 +352,30 @@ class RemoteInbox:
         self.wire.put(f"inbox/{str(aid)[:8]}", d)
         return True
 
-    def delivered(self, aid):
-        return list((((self.runner._snap() or {}).get("delivered")) or {}).get(str(aid)[:8]) or [])
+    def delivered(self, aid, snap=None):
+        snap = snap if snap is not None else (self.runner._snap() or {})
+        return [it for it in (snap.get("delivered") or {}).get(str(aid)[:8]) or [] if isinstance(it, dict)]
 
     def close(self, aid):
+        """Closed here, then (when something's still pending) wait for the host to have closed it
+        in the house too: only then is "what the body read" final, and the rest goes to a fresh body."""
+        a8 = str(aid)[:8]
         d = self._doc(aid)
         if not d:
             return []
         d["closed"] = True
-        self.wire.put(f"inbox/{str(aid)[:8]}", d)
-        took = {it.get("id") for it in self.delivered(aid)}
-        return [it for it in d.get("pending") or [] if it.get("id") not in took]
+        self.wire.put(f"inbox/{a8}", d)
+        pending = [it for it in d.get("pending") or [] if isinstance(it, dict)]
+        snap = self.runner._snap(fresh=True) or {}
+        took = {it.get("id") for it in self.delivered(aid, snap)}
+        if any(it.get("id") not in took for it in pending):
+            for _ in range(self.CLOSE_WAIT_S):
+                if a8 in (snap.get("acked") or {}):
+                    break
+                self.runner.time.sleep(1)
+                snap = self.runner._snap(fresh=True) or {}
+            took = {it.get("id") for it in self.delivered(aid, snap)}
+        return [it for it in pending if it.get("id") not in took]
 
     def meta(self, aid):
         m = (self._doc(aid) or {}).get("meta")
@@ -324,13 +387,22 @@ class RemoteInbox:
     answered = staticmethod(local_inbox.answered)
 
     def sweep(self, bridge, owned8, gc, now=None):
-        for a8 in gc:
-            if a8 not in owned8:
-                try:
-                    self.remove(a8)
-                except Exception:
-                    pass
-        return []
+        """Drop this bridge's inboxes whose body it no longer owns: the ones it dropped last tick,
+        and any other the host holds for it (a crash between close and save left one behind)."""
+        strays = []
+        held = [str(a) for a in (self.runner._snap() or {}).get("inboxes") or []]
+        for a8 in set(gc) | set(held):
+            if a8 in owned8:
+                continue
+            try:
+                if a8 not in gc and self.meta(a8).get("bridge") != bridge:
+                    continue
+                self.remove(a8)
+                if a8 not in gc:
+                    strays.append(a8)
+            except Exception:
+                continue
+        return strays
 
 
 # ---------------------------------------------------------------- the host, in the agent's house
@@ -344,7 +416,10 @@ class Host:
     inboxes into the house's inbox dir, stops what it's told to, and reports. One sync a beat.
 
     `runner` is a local runner (runner.ClaudeRunner); `inbox` is shuttle/inbox.py, configured
-    to the house's inbox dir. Exits (run() returns) after `idle_s` with no live body and nothing asked."""
+    to the house's inbox dir. Exits (run() returns) after `idle_s` with no live body and nothing asked.
+
+    It never reports what it can't see: a failed registry read, or a restart before it has read
+    its last report back, skips the beat (the bridge then reads "can't tell"), never "no bodies"."""
 
     def __init__(self, wire, runner, inbox=local_inbox, cwd=None, time=time, idle_s=600, sent_log=None,
                  always_deny=()):
@@ -354,40 +429,71 @@ class Host:
         self.cwd = cwd or os.getcwd()
         self.time, self.idle_s = time, idle_s
         self.done = {}            # rid -> [aid]: what the bridge's claim reads
+        self.starting = {}        # rid -> launch handle, between start and claim (a crash there must not start it twice)
         self.mine = set()         # aids this host started
+        self.ended = {}           # aid -> (when, its last report): its death is judged on these
         self.mirrored = {}        # aid8 -> ids already written to the local pending
+        self.acked = {}           # aid8 -> when the house's copy was closed
+        self.seen = {}            # aid -> its entry in the last report (an ended body's last word)
         self.last_busy = self.time.time()
         self.got = {}
         self._resumed = False
 
     def _resume(self):
         """A restarted host picks up where its last report left off: the bodies it started are
-        still its own (else the bridge reads them as dead and retries them)."""
-        self._resumed = True
+        still its own (else the bridge reads them as dead and retries them), and a launch it was
+        claiming when it stopped is found, never started again. Until this has read the last
+        report (or found there is none), the host doesn't report."""
         try:
-            prev = self.wire.get("host") or {}
-        except Exception:
-            return
+            prev = _valid(self.wire.get("host")) or {}
+        except Exception as e:
+            print(f"body host: can't read my last report yet ({e!r}); not reporting until I can", flush=True)
+            return False
         self.mine |= set(prev.get("bodies") or {})
-        self.done = {rid: list(ids) for rid, ids in (prev.get("done") or {}).items() if isinstance(ids, list)}
+        self.done = {rid: [str(a) for a in ids] for rid, ids in (prev.get("done") or {}).items()}
         self.mine |= {a for ids in self.done.values() for a in ids}
+        self.ended = {aid: (self.time.time(), b) for aid, b in (prev.get("ended") or {}).items()}
+        for rid, h in (prev.get("starting") or {}).items() if isinstance(prev.get("starting"), dict) else ():
+            if rid not in self.done and isinstance(h, dict):
+                ids = sorted(self.runner.find(dict(h, before=[]), self.mine))
+                self.done[rid] = ids
+                self.mine |= set(ids)
+        self._resumed = True
+        return True
+
+    def _entry(self, aid, status):
+        last = self.runner.last_entry(aid)
+        if isinstance(last, dict):
+            last = {k: (str(last.get(k) or "")[:MAX_TEXT]) for k in ("state", "detail", "text")}
+        return {"status": status, "done": self.runner.done(aid), "parked": self.runner.parked(aid),
+                "quiet_s": self.runner.quiet_s(aid), "last": last if isinstance(last, dict) else None}
 
     def snapshot(self):
+        """The report, or None when the registry can't be read (then nothing is reported)."""
+        listed = self.runner.list(strict=True)
+        if listed is None:
+            return None
         bodies, delivered = {}, {}
-        for a in self.runner.list() or []:
+        for a in listed:
             aid = a.get("id")
-            if aid not in self.mine:
-                continue
-            last = self.runner.last_entry(aid)
-            if isinstance(last, dict):
-                last = {k: (str(last.get(k) or "")[:MAX_TEXT]) for k in ("state", "detail", "text")}
-            bodies[aid] = {"status": a.get("status"), "done": self.runner.done(aid), "parked": self.runner.parked(aid),
-                           "quiet_s": self.runner.quiet_s(aid), "last": last}
+            if aid in self.mine:
+                bodies[aid] = self._entry(aid, a.get("status"))
+        now = self.time.time()
+        claimed = {a for ids in self.done.values() for a in ids}
+        for aid in self.mine - set(bodies) - claimed:   # ended: keep what its death is judged on, a while
+            if aid not in self.ended:
+                e, seen = self._entry(aid, "gone"), self.seen.get(aid) or {}
+                self.ended[aid] = (now, dict(e, last=e["last"] or seen.get("last"), done=e["done"] or seen.get("done", False)))
+        self.seen = bodies
+        self.ended = {a: v for a, v in self.ended.items() if now - v[0] < ENDED_S and a not in bodies}
+        self.mine = set(bodies) | claimed | set(self.ended)
         for a8 in list(self.mirrored):
             delivered[a8] = [{"id": it.get("id"), "rt": it.get("rt")} for it in self.inbox.delivered(a8)]
-        self.mine &= set(bodies) | {a for ids in self.done.values() for a in ids}
-        return {"at": self.time.time(), "model": self.runner.resolve_model(), "bodies": bodies,
-                "delivered": delivered, "done": self.done, "sent": self._sent()}
+        handles = {rid: {k: v for k, v in h.items() if k != "before"} for rid, h in self.starting.items()}
+        return {"at": now, "model": self.runner.resolve_model(), "bodies": bodies,
+                "ended": {a: v[1] for a, v in self.ended.items()}, "delivered": delivered, "done": self.done,
+                "starting": handles, "acked": dict(self.acked), "inboxes": sorted(self.mirrored),
+                "sent": self._sent()}
 
     def _sent(self):
         """The sent log's lines for this host's bodies (and job "-", a send that named none:
@@ -400,41 +506,79 @@ class Host:
         out = [ln for ln in lines if len(ln.split()) >= 3 and (ln.split()[1] == "-" or ln.split()[1][:8] in mine8)]
         return out[-SENT_LINES:]
 
-    def step(self):
-        if not self._resumed:
-            self._resume()
+    def _report(self):
         snap = self.snapshot()
+        if snap is not None:
+            self.wire.put("host", snap)
+
+    def step(self):
+        if not self._resumed and not self._resume():
+            return
+        snap = self.snapshot()
+        if snap is None:
+            print("body host: the registry can't be read; not reporting this beat", flush=True)
+            return
         self.got = got = self.wire.sync(snap)
         reqs = got.get("req") or {}
         # A request the bridge has deleted was claimed: forget its answer.
         self.done = {rid: ids for rid, ids in self.done.items() if rid in reqs}
         started = False
         for rid, r in reqs.items():
-            if rid in self.done:
-                continue
-            if not isinstance(r, dict) or not isinstance(r.get("prompt"), str) or \
-                    self.time.time() - float(r.get("at") or 0) > REQ_TTL_S:
-                # Malformed, or asked so long ago the bridge has given up on it: its text goes now.
-                self._forget(f"req/{rid}")
-                continue
-            started = True
-            env = {**os.environ, **{k: str(v) for k, v in (r.get("env") or {}).items() if ENV_PASS.match(k)}}
-            h = self.runner.start(r["prompt"], r.get("model") or self.runner.resolve_model(),
-                                  _merge([str(x) for x in r.get("deny") or []], self.always_deny),
-                                  env if r.get("env") else None, self.cwd)
-            ids = sorted(self.runner.claim(h, self.mine))
-            self.done[rid] = ids
-            self.mine |= set(ids)
-            print(f"body host: started {ids or 'nothing'} for request {rid}", flush=True)
+            try:
+                started |= self._take(rid, r)
+            except Exception as e:   # one bad ask must not hold up the rest
+                print(f"body host: request {rid} failed ({e!r})", flush=True)
+                self.starting.pop(rid, None)
         for aid in (got.get("stop") or {}):
-            if aid in self.mine:
-                self.runner.stop(aid)
+            try:
+                if aid in self.mine:
+                    self.runner.stop(aid)
+            except Exception as e:
+                print(f"body host: stopping {aid} failed ({e!r})", flush=True)
             self._forget(f"stop/{aid}")
         self._mirror(got.get("inbox") or {})
-        if started:   # the bridge is waiting on these: say so now, not a beat later
-            self.wire.put("host", self.snapshot())
+        if started or self.acked.keys() - set(snap["acked"]):   # the bridge is waiting on these: now, not a beat later
+            self._report()
         if any(not b["done"] for b in snap["bodies"].values()) or reqs:
             self.last_busy = self.time.time()
+
+    def _take(self, rid, r):
+        """One ask. True when a body was started for it."""
+        if not isinstance(r, dict):
+            self._forget(f"req/{rid}")
+            return False
+        if r.get("withdrawn"):
+            # The bridge gave up on it and retried: whatever this started for it nobody will claim.
+            for aid in self.done.pop(rid, []):
+                self.runner.stop(aid)
+            self._forget(f"req/{rid}")
+            return False
+        try:
+            age = self.time.time() - float(r.get("at") or 0)
+        except (TypeError, ValueError):
+            age = REQ_TTL_S + 1
+        if age > REQ_TTL_S or not isinstance(r.get("prompt"), str):
+            # Malformed, or asked so long ago the bridge has given up on it: its text goes now.
+            self.done.pop(rid, None)
+            self._forget(f"req/{rid}")
+            return False
+        if rid in self.done:
+            return False
+        env = {**os.environ, **{k: str(v) for k, v in (r.get("env") or {}).items() if ENV_PASS.match(k)}} \
+            if isinstance(r.get("env"), dict) and r["env"] else None
+        h = self.runner.start(r["prompt"], r.get("model") or self.runner.resolve_model(),
+                              _merge([str(x) for x in r.get("deny") or []], self.always_deny), env, self.cwd)
+        self.starting[rid] = h
+        try:
+            self._report()   # the launch is on record before the wait: a crash now finds it, never re-starts it
+        except Exception:
+            pass
+        ids = sorted(self.runner.claim(h, self.mine))
+        self.starting.pop(rid, None)
+        self.done[rid] = ids
+        self.mine |= set(ids)
+        print(f"body host: started {ids or 'nothing'} for request {rid}", flush=True)
+        return True
 
     def _forget(self, sub):
         try:
@@ -444,24 +588,32 @@ class Host:
 
     def _mirror(self, docs):
         for a8, d in docs.items():
-            if not isinstance(d, dict):
-                continue
-            m = d.get("meta") or {}
-            if a8 not in self.mirrored:
-                # What's already here (a restarted host) is never handed over twice.
-                here = self.inbox.delivered(a8) + self.inbox._read_jsonl(self.inbox.path_for(a8) / "pending.jsonl")
-                if not self.inbox.path_for(a8).is_dir():
-                    self.inbox.open_inbox(a8, m.get("venue"), m.get("chan"), m.get("bridge"))
-                self.mirrored[a8] = {it.get("id") for it in here}
-            new = [it for it in d.get("pending") or [] if isinstance(it, dict) and it.get("id") not in self.mirrored[a8]]
-            if new and self.inbox.put(a8, [{k: v for k, v in it.items() if k != "t"} for it in new],
-                                      now=new[-1].get("t")):
-                self.mirrored[a8] |= {it.get("id") for it in new}
-            if d.get("closed"):
-                self.inbox.close(a8)
+            try:
+                self._mirror_one(a8, d)
+            except Exception as e:
+                print(f"body host: inbox {a8} failed ({e!r})", flush=True)
         for a8 in set(self.mirrored) - set(docs):   # the bridge removed it
             self.inbox.remove(a8)
             del self.mirrored[a8]
+            self.acked.pop(a8, None)
+
+    def _mirror_one(self, a8, d):
+        if not isinstance(d, dict):
+            return
+        m = d.get("meta") if isinstance(d.get("meta"), dict) else {}
+        if a8 not in self.mirrored:
+            # What's already here (a restarted host) is never handed over twice.
+            here = self.inbox.delivered(a8) + self.inbox._read_jsonl(self.inbox.path_for(a8) / "pending.jsonl")
+            if not self.inbox.path_for(a8).is_dir():
+                self.inbox.open_inbox(a8, m.get("venue"), m.get("chan"), m.get("bridge"))
+            self.mirrored[a8] = {it.get("id") for it in here}
+        new = [it for it in d.get("pending") or [] if isinstance(it, dict) and it.get("id") not in self.mirrored[a8]]
+        if new and self.inbox.put(a8, [{k: v for k, v in it.items() if k != "t"} for it in new],
+                                  now=new[-1].get("t")):
+            self.mirrored[a8] |= {it.get("id") for it in new}
+        if d.get("closed") and a8 not in self.acked:
+            self.inbox.close(a8)   # under the inbox lock: after this the hook takes nothing more
+            self.acked[a8] = self.time.time()
 
     def idle(self):
         """No live body and nothing asked for idle_s (0: never, for a host run as a kept-up service)."""
