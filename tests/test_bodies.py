@@ -320,6 +320,19 @@ class Bodies(unittest.TestCase):
         firsts = [rid for rid in (h1["rid"], h2["rid"]) if rid in seen[1]]
         self.assertEqual(len(firsts), 1, "the first claim is published before the second wait")
 
+    def test_a_fresh_house_whose_registry_cant_answer_yet_still_takes_its_first_ask(self):
+        self.harness.fail_list = True
+        self.beat()
+        self.assertEqual(self.runner.list(strict=True), [], "owning nothing, it says so")
+        h = self.runner.start("brief", "m", [], None, "/w")
+        self.beat()
+        self.assertEqual(len(self.harness.started), 1)
+        self.harness.fail_list = True
+        self.beat()
+        self.assertTrue(self.runner.find(h, set()), "its claim was published before the read failed")
+        (aid,) = self.runner.find(h, set())
+        self.assertEqual(self.runner.list(strict=True), [{"id": aid, "status": "busy"}], "never read as gone")
+
     def test_a_malformed_report_is_cant_tell_not_a_crash(self):
         for bad in ({"at": "soon"}, {"at": 1000, "bodies": []}, {"at": 1000, "bodies": {"x": {"quiet_s": "q"}}},
                     {"at": 1000, "done": {"r": "x"}}, ["not", "a", "dict"], {"at": 1e308},
