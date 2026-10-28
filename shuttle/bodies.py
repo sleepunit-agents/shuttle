@@ -41,6 +41,7 @@ SUB = re.compile(r"^[a-z][a-z0-9-]{0,39}/[a-z][a-z0-9-]{0,39}/(host|req/[0-9a-f]
 # (with other secrets) to start a body of its choosing.
 PROFILE = re.compile(r"^[a-z][a-z0-9-]{0,32}-bodies$")
 HOST_SUFFIX = "-bodies"
+RID = re.compile(r"^[0-9a-f]{16}$")   # a request id, and a Claude launch's spawn token
 # Only these may ride along to a body's environment: the launcher's own scope
 # switches (Slack's field scope), never a credential.
 ENV_PASS = re.compile(r"^(SHUTTLE_[A-Z0-9_]+|BRIDGE_[A-Z0-9_]+)$")
@@ -453,11 +454,20 @@ class Host:
         self.done = {rid: [str(a) for a in ids] for rid, ids in (prev.get("done") or {}).items()}
         self.mine |= {a for ids in self.done.values() for a in ids}
         self.ended = {aid: (self.time.time(), b) for aid, b in (prev.get("ended") or {}).items()}
-        for rid, h in (prev.get("starting") or {}).items() if isinstance(prev.get("starting"), dict) else ():
-            if rid not in self.done and isinstance(h, dict):
-                ids = sorted(self.runner.find(dict(h, before=[]), self.mine))
-                self.done[rid] = ids
-                self.mine |= set(ids)
+        starting = prev.get("starting") if isinstance(prev.get("starting"), dict) else {}
+        for rid, h in starting.items():
+            # Anything in this house can write the report: only a handle of the launch's own shape is
+            # looked for, and only among bodies nobody owns yet.
+            if rid in self.done or not RID.match(str(rid)) or not isinstance(h, dict) or \
+                    not isinstance(h.get("token"), str) or not RID.match(h["token"]):
+                continue
+            try:
+                ids = sorted(self.runner.find({"token": h["token"], "before": []}, self.mine))
+            except Exception as e:
+                print(f"body host: finding launch {rid} again failed ({e!r})", flush=True)
+                continue
+            self.done[rid] = ids if len(ids) == 1 else []
+            self.mine |= set(self.done[rid])
         self._resumed = True
         return True
 
