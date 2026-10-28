@@ -113,40 +113,36 @@ class Page(unittest.TestCase):
     def act(self, action, fields):
         return gates_page.act(action, fields, get=self.s.get, put=self.s.put)
 
-    def test_an_offer_is_reviewed_then_saved_over_the_offer_shown(self):
+    def test_an_offer_is_shown_as_tables_and_saved_exactly_as_shown(self):
         self.s.put(gates.OFFERS, "pip", {"doc": DOC, "at": 1, "from": "discord"})
         sec = gates_page.section(get=self.s.get, keys=self.s.keys)
-        row = sec["blocks"][0]["items"][0]
+        self.assertIn("press the button", sec["blocks"][0]["text"], "it says what to do")
+        row = sec["blocks"][1]["items"][0]
         self.assertEqual(row["page"], "offer/pip")
         self.assertNotIn("act", row, "never a one-tap accept")
         pg = gates_page.offer_page("pip", get=self.s.get)
-        callout, form = pg["sections"][0]["blocks"]
+        callout, table, form = pg["sections"][0]["blocks"]
         self.assertIn("robin", callout["text"], "tier 3 is flagged")
-        self.assertEqual(form["hidden"], {"agent": "pip", "offer_rev": "1"})
+        self.assertEqual(table["rows"][0][:3], ["Robin", "robin", "3 · owner"])
+        self.assertEqual((form["fields"], form["hidden"]), ([], {"agent": "pip", "offer_rev": "1"}), "no JSON box")
         # The bridge changes its offer after the owner opened it: refused.
         self.s.put(gates.OFFERS, "pip", {"doc": {"people": {"evil": {"tier": 3}}}, "at": 2})
-        self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "1", "doc": form["fields"][0]["value"]})["ok"])
-        # Opened again and saved as the owner read (and trimmed) it.
-        form = gates_page.offer_page("pip", get=self.s.get)["sections"][0]["blocks"][-1]
-        trimmed = {"people": {}, "agents": {}}
-        self.assertTrue(self.act("people-accept", {"agent": "pip", "offer_rev": form["hidden"]["offer_rev"], "doc": json.dumps(trimmed)})["ok"])
-        self.assertEqual(self.s.get(gates.PEOPLE, "pip"), (trimmed, 1))
-        # Accepting again doesn't overwrite what's there now.
-        self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "2", "doc": json.dumps(DOC)})["ok"])
+        self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "1"})["ok"])
+        self.assertTrue(self.act("people-accept", {"agent": "pip", "offer_rev": "2"})["ok"])
+        self.assertEqual(self.s.get(gates.PEOPLE, "pip")[0], {"people": {"evil": {"tier": 3}}}, "what was shown at rev 2")
+        self.assertFalse(self.act("people-accept", {"agent": "pip", "offer_rev": "2"})["ok"], "never over a saved one")
+        self.assertFalse(self.act("people-accept", {"agent": "../x", "offer_rev": "2"})["ok"])
+        self.assertIsNone(self.act("people-save", {}), "no free-form save")
 
-    def test_saving_is_over_the_revision_opened_and_checked(self):
-        self.s.put(gates.PEOPLE, "kit", DOC)
-        form = gates_page.page("kit", get=self.s.get)["sections"][0]["blocks"][0]
-        self.assertEqual(form["hidden"], {"agent": "kit", "rev": "1"})
-        edited = dict(DOC, people={**DOC["people"], "kim": {"name": "Kim", "tier": 1}})
-        self.assertTrue(self.act("people-save", {"agent": "kit", "rev": "1", "doc": json.dumps(edited)})["ok"])
-        stale = self.act("people-save", {"agent": "kit", "rev": "1", "doc": json.dumps(DOC)})
-        self.assertFalse(stale["ok"])
-        self.assertIn("reload", stale["message"])
-        self.assertFalse(self.act("people-save", {"agent": "kit", "rev": "2", "doc": "{nope"})["ok"])
-        self.assertFalse(self.act("people-save", {"agent": "kit", "rev": "2", "doc": '{"people": {}, "x": 1}'})["ok"])
-        self.assertFalse(self.act("people-save", {"agent": "../x", "rev": "2", "doc": "{}"})["ok"])
-        self.assertIsNone(self.act("something-else", {}))
+    def test_a_long_document_fits_the_page(self):
+        many = {"people": {f"p{i}": {"name": "N" * 40, "tier": 2, "slack": {"T": f"U{i}"}, "grant": ["x" * 50] * 20}
+                           for i in range(300)}}
+        self.s.put(gates.OFFERS, "pip", {"doc": many, "at": 1})
+        for b in gates_page.offer_page("pip", get=self.s.get)["sections"][0]["blocks"]:
+            for r in b.get("rows") or []:
+                self.assertLessEqual(len(r), 5)
+                self.assertTrue(all(len(str(c)) <= gates_page.CELL for c in r))
+            self.assertLessEqual(len(b.get("rows") or []), gates_page.ROWS)
 
 
 ROUTES = {"bots": {"kit": "1", "pip": "2"}, "channels": {"c1": "kit"}}
@@ -175,23 +171,30 @@ class Routes(unittest.TestCase):
         for a in ("kit", "pip"):
             self.assertEqual(json.loads(self.ask({"kind": "agent", "agent": a}, ["routes"])["body"]["stdout"])["doc"], ROUTES)
 
-    def test_an_offer_is_reviewed_and_saved_over_the_offer_shown_then_edited_by_revision(self):
-        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": ROUTES, "at": 1})
-        rows = gates_page.section(get=self.s.get, keys=self.s.keys)["blocks"][0]["items"]
-        self.assertEqual([r["page"] for r in rows], ["routes-offer/kit"])
-        form = gates_page.routes_offer_page("kit", get=self.s.get)["sections"][0]["blocks"][0]
-        self.assertEqual(form["hidden"], {"agent": "kit", "offer_rev": "1"})
-        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": {"channels": {}}, "at": 2})
-        self.assertFalse(self.act("routes-accept", {"agent": "kit", "offer_rev": "1", "doc": json.dumps(ROUTES)})["ok"])
-        self.assertTrue(self.act("routes-accept", {"agent": "kit", "offer_rev": "2", "doc": json.dumps(ROUTES)})["ok"])
-        self.assertEqual(self.s.get(gates.ROUTES, gates.HOUSEHOLD), (ROUTES, 1))
-        self.assertFalse(self.act("routes-accept", {"agent": "kit", "offer_rev": "2", "doc": "{}"})["ok"], "never over a saved map")
-        rows = gates_page.section(get=self.s.get, keys=self.s.keys)["blocks"][0]["items"]
+    def test_two_bridges_copies_are_compared_and_one_is_used_as_shown(self):
+        older = {"bots": {"kit": "1"}, "channels": {"c1": {"name": "general", "primary": "kit"}}, "ignore": {"c9": 1}}
+        newer = {"bots": {"kit": "1", "pip": "2"}, "channels": {"c1": {"name": "general", "primary": "kit"},
+                                                                 "c2": {"name": "games", "primary": "pip"}},
+                 "_updated": "2026-10-12 (#games added)"}
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": newer, "at": 1})
+        self.s.put(gates.ROUTE_OFFERS, "pip", {"doc": older, "at": 1})
+        rows = gates_page.section(get=self.s.get, keys=self.s.keys)["blocks"][1]["items"]
+        self.assertEqual([r["page"] for r in rows], ["routes-offer/kit", "routes-offer/pip"])
+        self.assertIn("updated 2026-10-12", rows[0]["meta"])
+        blocks = gates_page.routes_offer_page("kit", get=self.s.get, keys=self.s.keys)["sections"][0]["blocks"]
+        diff = blocks[0]["text"]
+        self.assertIn("only here: #games", diff)
+        self.assertIn("never answers in 1 more", diff)
+        form = blocks[-1]
+        self.assertEqual(form["fields"], [])
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": newer, "at": 2})
+        self.assertFalse(self.act("routes-accept", {"agent": "kit", "offer_rev": form["hidden"]["offer_rev"]})["ok"])
+        self.assertTrue(self.act("routes-accept", {"agent": "kit", "offer_rev": "2"})["ok"])
+        self.assertEqual(self.s.get(gates.ROUTES, gates.HOUSEHOLD), (newer, 1))
+        self.assertFalse(self.act("routes-accept", {"agent": "pip", "offer_rev": "1"})["ok"], "never over a saved map")
+        rows = gates_page.section(get=self.s.get, keys=self.s.keys)["blocks"][-1]["items"]
         self.assertEqual([r["page"] for r in rows], ["routes"])
-        form = gates_page.routes_page(get=self.s.get)["sections"][0]["blocks"][0]
-        self.assertTrue(self.act("routes-save", {"rev": form["hidden"]["rev"], "doc": json.dumps({**ROUTES, "ignore": {}})})["ok"])
-        self.assertFalse(self.act("routes-save", {"rev": "1", "doc": "{}"})["ok"], "stale revision")
-        self.assertFalse(self.act("routes-save", {"rev": "2", "doc": "[]"})["ok"])
+        self.assertEqual(gates_page.routes_page(get=self.s.get)["sections"][0]["blocks"][1]["rows"][0][:2], ["#games", "pip"])
 
     def test_a_bridge_reads_loom_once_saved_else_its_file_offered_once(self):
         d = Path(tempfile.mkdtemp(prefix="shuttle-routes-"))
