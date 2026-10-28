@@ -113,6 +113,11 @@ def routes_problem(doc):
         for v in (doc.get(k) or {}).values():
             if not isinstance(v, dict) or not (v.get("primary") is None or isinstance(v.get("primary"), str)):
                 return f"each of {k} is {{name, primary}}, primary an agent or null"
+            if not (v.get("name") is None or isinstance(v.get("name"), str)):
+                return f"a name in {k} is text"
+    for k, v in (doc.get("notify") or {}).items():
+        if not (v is None or isinstance(v, str)):
+            return "notify maps a name to a channel id"
     return None
 
 
