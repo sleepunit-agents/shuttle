@@ -149,5 +149,59 @@ class Page(unittest.TestCase):
         self.assertIsNone(self.act("something-else", {}))
 
 
+ROUTES = {"bots": {"kit": "1", "pip": "2"}, "channels": {"c1": "kit"}}
+
+
+class Routes(unittest.TestCase):
+    """bridges.md step 3: one household route map in loom, read by every agent's bridge."""
+
+    def setUp(self):
+        self.s = Store()
+
+    def ask(self, caller, argv):
+        return gates.api_answer(caller, argv, run_get=self.s.get, run_put=self.s.put)
+
+    def act(self, action, fields):
+        return gates_page.act(action, fields, get=self.s.get, put=self.s.put)
+
+    def test_every_agents_bridge_reads_the_one_map_and_only_offers(self):
+        self.assertEqual(json.loads(self.ask({"kind": "agent", "agent": "kit"}, ["routes"])["body"]["stdout"]), {"doc": None, "rev": 0})
+        self.assertEqual(self.ask({"kind": "agent", "agent": "kit"}, ["offer-routes", "--doc", json.dumps(ROUTES)])["status"], 200)
+        self.assertEqual(self.s.get(gates.ROUTES, gates.HOUSEHOLD), (None, 0), "an offer never becomes the map")
+        self.assertEqual(self.s.get(gates.ROUTE_OFFERS, "kit")[0]["doc"], ROUTES)
+        self.assertEqual(self.ask({"kind": "agent", "agent": "kit"}, ["offer-routes", "--doc", "[1]"])["status"], 400)
+        self.assertEqual(self.ask({"kind": "owner"}, ["routes"])["status"], 403)
+        self.s.put(gates.ROUTES, gates.HOUSEHOLD, ROUTES)
+        for a in ("kit", "pip"):
+            self.assertEqual(json.loads(self.ask({"kind": "agent", "agent": a}, ["routes"])["body"]["stdout"])["doc"], ROUTES)
+
+    def test_an_offer_is_reviewed_and_saved_over_the_offer_shown_then_edited_by_revision(self):
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": ROUTES, "at": 1})
+        rows = gates_page.section(get=self.s.get, keys=self.s.keys)["blocks"][0]["items"]
+        self.assertEqual([r["page"] for r in rows], ["routes-offer/kit"])
+        form = gates_page.routes_offer_page("kit", get=self.s.get)["sections"][0]["blocks"][0]
+        self.assertEqual(form["hidden"], {"agent": "kit", "offer_rev": "1"})
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": {"channels": {}}, "at": 2})
+        self.assertFalse(self.act("routes-accept", {"agent": "kit", "offer_rev": "1", "doc": json.dumps(ROUTES)})["ok"])
+        self.assertTrue(self.act("routes-accept", {"agent": "kit", "offer_rev": "2", "doc": json.dumps(ROUTES)})["ok"])
+        self.assertEqual(self.s.get(gates.ROUTES, gates.HOUSEHOLD), (ROUTES, 1))
+        self.assertFalse(self.act("routes-accept", {"agent": "kit", "offer_rev": "2", "doc": "{}"})["ok"], "never over a saved map")
+        rows = gates_page.section(get=self.s.get, keys=self.s.keys)["blocks"][0]["items"]
+        self.assertEqual([r["page"] for r in rows], ["routes"])
+        form = gates_page.routes_page(get=self.s.get)["sections"][0]["blocks"][0]
+        self.assertTrue(self.act("routes-save", {"rev": form["hidden"]["rev"], "doc": json.dumps({**ROUTES, "ignore": {}})})["ok"])
+        self.assertFalse(self.act("routes-save", {"rev": "1", "doc": "{}"})["ok"], "stale revision")
+        self.assertFalse(self.act("routes-save", {"rev": "2", "doc": "[]"})["ok"])
+
+    def test_a_bridge_reads_loom_once_saved_else_its_file_offered_once(self):
+        d = Path(tempfile.mkdtemp(prefix="shuttle-routes-"))
+        f = d / "routes.json"
+        f.write_text(json.dumps(ROUTES))
+        calls, loom = [], {"doc": None, "rev": 0}
+        r = gates.Routes(f, remote=lambda argv: calls.append(argv[0]) or (loom if argv[0] == "routes" else {"ok": True}))
+        self.assertEqual(r.doc(), ROUTES)
+        self.assertEqual(calls, ["routes", "offer-routes"])
+
+
 if __name__ == "__main__":
     unittest.main()

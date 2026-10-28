@@ -26,6 +26,12 @@
       },
       "offers": {
         "writers": "piece"
+      },
+      "routes": {
+        "writers": "owner"
+      },
+      "route-offers": {
+        "writers": "piece"
       }
     }
   }
