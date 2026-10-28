@@ -31,6 +31,14 @@ def _count(doc):
     return len((doc or {}).get("people") or {}), len((doc or {}).get("agents") or {})
 
 
+def _nm(names, c):
+    """A channel's name for display, whatever odd value a bridge's file put there."""
+    try:
+        return str(names.get(str(c)) or c)
+    except Exception:
+        return "?"
+
+
 def _note(doc):
     """A document's own `_updated` note, shortened: how a person tells two copies apart."""
     u = (doc or {}).get("_updated")
@@ -124,14 +132,14 @@ def channel_blocks(agent, part, names=None):
     never = (part.get("extra") or {}).get("ignore") or {}
     kv = [{"label": "Its bot", "value": str(part.get("bot") or "—")},
           {"label": "Its bot's role", "value": str(part.get("bot_role") or "—")},
-          {"label": "Its alerts go to", "value": "#" + str(names.get(part.get("notify")) or part.get("notify")) if part.get("notify") else "—"}]
+          {"label": "Its alerts go to", "value": "#" + _nm(names, part.get("notify")) if part.get("notify") else "—"}]
     if part.get("threads"):
         kv.append({"label": "Threads it answers in", "value": str(len(part["threads"]))})
     if never:
-        kv.append({"label": "Never answers in", "value": _cut(", ".join("#" + str(names.get(c) or c) for c in never))})
+        kv.append({"label": "Never answers in", "value": _cut(", ".join("#" + _nm(names, c) for c in never))})
     for k, v in sorted((part.get("extra") or {}).items()):
         if k != "ignore":
-            kv.append({"label": f"Its bridge's {k}", "value": _cut(", ".join("#" + str(names.get(c) or c) for c in v)
+            kv.append({"label": f"Its bridge's {k}", "value": _cut(", ".join("#" + _nm(names, c) for c in v)
                                                                    if isinstance(v, (dict, list)) else v)})
     blocks.append({"type": "kv", "items": kv})
     return blocks
@@ -147,7 +155,7 @@ def _differences(agent, shown_by, sources):
         names = household.get("channel_names") or {}
         a, t = set(mine.get("answers") or {}), set(theirs.get("answers") or {})
         if t - a:
-            bits.append(f"{b}'s copy also has {agent} answering in " + ", ".join("#" + str(names.get(c) or c) for c in sorted(t - a)))
+            bits.append(f"{b}'s copy also has {agent} answering in " + ", ".join("#" + _nm(names, c) for c in sorted(t - a)))
         if a - t:
             bits.append(f"{b}'s copy doesn't have {agent} in " + ", ".join("#" + str((mine.get("answers") or {}).get(c) or c) for c in sorted(a - t)))
         if (theirs.get("bot") or None) != (mine.get("bot") or None):
@@ -217,6 +225,14 @@ def people_page(agent, get=gates.get):
 
 
 def channels_page(agent, get=gates.get, keys=gates.list_keys):
+    try:
+        return _channels_page(agent, get, keys)
+    except (AttributeError, TypeError, ValueError, KeyError) as e:   # an odd file shows as that, never a broken page
+        return {"title": f"{agent}'s channels", "sections": [{"id": "odd", "blocks": [
+            {"type": "callout", "tone": "bad", "title": "Can't show this", "text": _cut(f"A bridge's file has something odd in it: {e!r}")}]}]}
+
+
+def _channels_page(agent, get, keys):
     if not AGENT.match(agent or ""):
         return {"title": "Not found", "sections": []}
     household, _ = get(gates.ROUTES, gates.HOUSEHOLD)
@@ -255,7 +271,7 @@ def channels_page(agent, get=gates.get, keys=gates.list_keys):
               {"label": "Webhook peers", "value": _cut(", ".join(str(k) for k in (hh.get("webhook_peers") or {}) if not str(k).startswith("_")) or "—")},
               {"label": "Guests", "value": str(len([k for k in (hh.get("guests") or {}) if not str(k).startswith("_")]))},
               {"label": "Peer turns each", "value": str(hh.get("peer_turns_each") if hh.get("peer_turns_each") is not None else "no cap")},
-              {"label": "Household alerts", "value": _cut(", ".join(f"{k}: #{(hh.get('channel_names') or {}).get(v) or v}" for k, v in (hh.get("notify") or {}).items())) or "—"}]
+              {"label": "Household alerts", "value": _cut(", ".join(f"{k}: #{_nm(hh.get('channel_names') or {}, v)}" for k, v in (hh.get("notify") or {}).items())) or "—"}]
         blocks.append({"type": "details", "summary": "Also saved: the household's part of this file", "blocks": [{"type": "kv", "items": kv}]})
     blocks.append({"type": "form", "action": "channels-accept", "submit": f"Use these as {agent}'s channels", "fields": [],
                    "note": "Saves exactly what's above into loom" + (

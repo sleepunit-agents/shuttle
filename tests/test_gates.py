@@ -218,6 +218,13 @@ class ChannelsHardening(unittest.TestCase):
         self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": MAP, "at": 1})
         self.assertEqual(sorted(a["page"] for a in gates_page.asks(get=self.s.get, keys=self.s.keys)), ["channels/kit", "channels/pip"])
         gates_page.channels_page("kit", get=self.s.get, keys=self.s.keys)
+        odd = json.loads(json.dumps(MAP))
+        odd["ignore"] = [[1, 2], {"x": 1}]
+        odd["notes_channels"] = [["nested"]]
+        self.s.put(gates.ROUTE_OFFERS, "kit", {"doc": odd, "at": 2})
+        self.assertTrue(gates_page.channels_page("kit", get=self.s.get, keys=self.s.keys)["sections"], "shown, not raised")
+        for bad in ({"notify": {"kit": ["c1"]}}, {"channels": {"c1": {"name": ["x"], "primary": "kit"}}}):
+            self.assertIsNotNone(gates.routes_problem(bad))
 
     def test_an_agents_own_bridge_copy_wins_and_its_extras_are_kept(self):
         mine = json.loads(json.dumps(MAP))
