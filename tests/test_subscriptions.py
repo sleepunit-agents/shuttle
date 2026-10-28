@@ -389,6 +389,30 @@ class Subscriptions(unittest.TestCase):
             self.assertEqual(r["status"], 403)
         self.assertEqual(ran, [])
 
+    def test_each_agents_fuel_is_on_its_own_tab_and_the_household_links_to_it(self):
+        def tool(*args, stdin="{}", scope=None):
+            env = dict(os.environ, **({"LOOM_SCOPE": scope} if scope else {}))
+            r = subprocess.run([sys.executable, str(ROOT / "tools/loom-subscriptions"), *args], input=stdin,
+                               capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout)
+        m = tool("ui", "--json")
+        self.assertEqual((m["tab"], m["agentTab"]), ({"label": "Subscriptions", "kind": "setting"}, {"label": "Fuel"}))
+        home = tool("ui", "page", "--json", stdin=json.dumps({"path": ""}))
+        who = [x for x in home["sections"] if x["id"] == "who"][0]
+        self.assertEqual([i["page"] for i in who["blocks"][1]["items"]], ["agent:robin"])
+        self.assertNotIn('"action": "assign"', json.dumps(home), "an order is set on the agent's own tab")
+        page = tool("ui", "page", "--json", stdin=json.dumps({"path": ""}), scope="robin")
+        form = [x for x in page["sections"] if x["id"] == "order"][0]["blocks"][0]
+        self.assertEqual((form["hidden"], form["fields"][0]["value"]), ({"agent": "robin"}, "main, spare"))
+        act = lambda fields, scope: tool("ui", "act", "--json", stdin=json.dumps({"action": "assign", "fields": fields}), scope=scope)
+        self.assertFalse(act({"agent": "kim", "order": "main"}, "robin")["ok"], "robin's page sets robin's order only")
+        self.assertTrue(act({"agent": "robin", "order": "spare, main"}, "robin")["ok"])
+        self.assertEqual(subs.load()["assign"]["robin"], ["spare", "main"])
+        loren = {"kind": "owner", "who": "loren", "agents": ["robin"]}
+        ro = tool("ui", "page", "--json", stdin=json.dumps({"path": "", "caller": loren}), scope="robin")
+        self.assertNotIn("order", [x["id"] for x in ro["sections"]], "an agent owner reads it, never sets it")
+
     def test_the_page_and_its_actions(self):
         def tool(*args, stdin="{}"):
             r = subprocess.run([sys.executable, str(ROOT / "tools/loom-subscriptions"), *args], input=stdin,
