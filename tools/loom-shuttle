@@ -133,8 +133,9 @@ def main(argv):
             print(json.dumps(signin_page(path)))
             return 0
         # Each agent's people document (its gates), a household owner's alone.
-        if path.startswith("people/"):
-            print(json.dumps(gates_page.page(path[len("people/"):]) if own is None else {"title": "Not found", "sections": []}))
+        if path.startswith("people/") or path.startswith("offer/"):
+            pg = gates_page.page(path[len("people/"):]) if path.startswith("people/") else gates_page.offer_page(path[len("offer/"):])
+            print(json.dumps(pg if own is None else {"title": "Not found", "sections": []}))
             return 0
         out = loomui.page(loomui.View.of(inst), path, req.get("query"))
         if own is not None:
