@@ -15,6 +15,7 @@ Put this on PATH as `loom-shuttle` (a symlink is fine). The instance comes
 from $SHUTTLE_INSTANCE, the same as the bridges.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -99,6 +100,25 @@ def api(req):
     return relay.api_answer(inst, _people_of(inst), req)
 
 
+def agent_bridges_page(inst, agent, household_page):
+    """One agent's Bridges: its people and channels; the house rules when these bridges are its."""
+    sections = []
+    try:
+        sec = gates_page.agent_section(agent)
+    except (OSError, ValueError) as e:
+        sec = {"id": "people", "title": "People and channels", "blocks": [
+            {"type": "text", "tone": "bad", "text": f"loom's store didn't answer: {e}"}]}
+    if sec:
+        sec = dict(sec, side=False)
+        sections.append(sec)
+    if inst.agent_slug == agent:
+        sections += [x for x in household_page.get("sections", []) if x.get("id") == "house-rules"]
+    if not sections:
+        sections.append({"id": "none", "blocks": [{"type": "text", "tone": "muted",
+                                                   "text": "No bridge has offered anything for this agent yet."}]})
+    return {"title": "Bridges", "sections": sections}
+
+
 class _Store:
     get, put, delete, docs = staticmethod(gates.get), staticmethod(gates.put), staticmethod(gates.delete), staticmethod(gates.docs)
 
@@ -148,6 +168,12 @@ def main(argv):
                   else gates_page.channels_page(path[len("channels/"):]))
             print(json.dumps(pg if own is None else {"title": "Not found", "sections": []}))
             return 0
+        scope = os.environ.get("LOOM_SCOPE", "").strip()
+        if path == "" and gates_page.AGENT.match(scope or "") and own is None:
+            # An agent's own Bridges tab (loom docs/extensions.md, agentTab): its people and channels, and its
+            # bridges' house rules when this instance is its.
+            print(json.dumps(agent_bridges_page(inst, scope, loomui.page(loomui.View.of(inst), path, req.get("query")))))
+            return 0
         out = loomui.page(loomui.View.of(inst), path, req.get("query"))
         if own is not None:
             # The house rules and signing in are the household owner's.
@@ -156,9 +182,10 @@ def main(argv):
             try:
                 agents = sorted(set(gates.list_keys(gates.PEOPLE)) | set(gates.list_keys(gates.OFFERS))
                                 | set(gates.list_keys(gates.CHANNELS)) | {inst.agent_slug})
-                people = [x for x in (gates_page.agent_section(a) for a in agents) if x]
-                for x, a in zip(people, [a for a in agents if gates_page.agent_section(a)]):
-                    x["title"] = f"{a}'s people and channels"
+                # Each agent's people and channels are on its own Bridges tab: here, one link each.
+                people = [{"id": "people", "title": "People and channels", "side": True, "blocks": [
+                    {"type": "text", "tone": "muted", "text": "Who each id is and where each agent answers: on each agent's own Bridges tab."},
+                    {"type": "list", "items": [{"text": f"{a}'s", "agent": a, "page": f"agent:{a}"} for a in agents]}]}]
             except (OSError, ValueError) as e:
                 people = [{"id": "people", "title": "People and channels", "side": True,
                            "blocks": [{"type": "text", "tone": "bad", "text": f"loom's store didn't answer: {e}"}]}]
