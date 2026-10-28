@@ -102,11 +102,25 @@ def valid(doc):
 
 # ---------------------------------------------------------------- the route map, per agent
 
+def routes_problem(doc):
+    """Why a routes.json can't be read as one, or None (a bridge's offer is checked before it's kept)."""
+    if not isinstance(doc, dict):
+        return "a route map is a JSON object"
+    for k in ("bots", "bot_roles", "channels", "threads", "notify"):
+        if k in doc and doc[k] is not None and not isinstance(doc[k], dict):
+            return f"{k} maps ids to entries"
+    for k in ("channels", "threads"):
+        for v in (doc.get(k) or {}).values():
+            if not isinstance(v, dict) or not (v.get("primary") is None or isinstance(v.get("primary"), str)):
+                return f"each of {k} is {{name, primary}}, primary an agent or null"
+    return None
+
+
 def split(doc, offered_by):
     """A routes.json, as the household's part and each agent's: (household, {agent: part}).
     What isn't about every agent (ignore, only, a brief's channel list, ...) is the offering
     bridge's own and goes to its agent's part."""
-    doc = doc if isinstance(doc, dict) else {}
+    doc = doc if isinstance(doc, dict) and routes_problem(doc) is None else {}
     bots, roles = doc.get("bots") or {}, doc.get("bot_roles") or {}
     channels = {k: v for k, v in (doc.get("channels") or {}).items() if isinstance(v, dict)}
     threads = {k: v for k, v in (doc.get("threads") or {}).items() if isinstance(v, dict)}
@@ -173,6 +187,9 @@ def routes_for(agent, run_get, list_keys):
         _, wanted = split(offer["doc"], agent)
         if set(wanted) - set(saved):
             return None
+        # Its own bridge's extras (never-answer list, only, ...) must be in its saved part, else keep the file.
+        if (wanted.get(agent) or {}).get("extra") and not saved[agent].get("extra"):
+            return None
     return assemble(agent, household, saved)
 
 
@@ -197,8 +214,9 @@ def api_answer(caller, argv, run_get=get, run_put=put, run_keys=None):
             doc = json.loads(argv[2])
         except ValueError:
             return refuse(400, "the offered document isn't JSON")
-        if not isinstance(doc, dict):
-            return refuse(400, "a route map is a JSON object")
+        why = routes_problem(doc)
+        if why:
+            return refuse(400, f"not a route map: {why}")
         run_put(ROUTE_OFFERS, agent, {"doc": doc, "at": time.time(), "from": caller.get("service") or caller.get("house") or "a bridge"})
         return {"status": 200, "body": {"exit": 0, "stdout": "offered\n", "stderr": ""}}
     if argv == ["people"]:
