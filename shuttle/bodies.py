@@ -446,9 +446,10 @@ class Host:
     its last report back, skips the beat (the bridge then reads "can't tell"), never "no bodies"."""
 
     def __init__(self, wire, runner, inbox=local_inbox, cwd=None, time=time, idle_s=600, sent_log=None,
-                 always_deny=()):
+                 always_deny=(), upgrader=None):
         self.wire, self.runner, self.inbox = wire, runner, inbox
         self.always_deny = list(always_deny)   # the instance's: every body here loses these, whatever it's asked
+        self.upgrader = upgrader   # shuttle/upgrade.py: stop when idle and behind, so a fresh house starts on new code
         self.sent_log = sent_log   # where the send tool logs, in this house
         self.cwd = cwd or os.getcwd()
         self.time, self.idle_s = time, idle_s
@@ -701,6 +702,15 @@ class Host:
             self.inbox.close(a8)   # under the inbox lock: after this the hook takes nothing more
             self.acked[a8] = self.time.time()
 
+    def live(self):
+        """The bodies of mine still running (a list, for the upgrader's 'talking')."""
+        return sorted(a for a, b in ((self.last_snap or {}).get("bodies") or {}).items() if not b.get("done"))
+
+    def asked(self):
+        """What the bridge is waiting on: asks, launches, open inboxes."""
+        return sorted(set((self.got or {}).get("req") or {}) | set(self.starting)
+                      | {a for a in self.mirrored if a not in self.acked})
+
     def idle(self):
         """No live body and nothing asked for idle_s (0: never, for a host run as a kept-up service)."""
         return bool(self.idle_s) and self.time.time() - self.last_busy >= self.idle_s
@@ -713,5 +723,9 @@ class Host:
                 print(f"body host: sync failed ({e!r})", flush=True)
             if self.idle():
                 print(f"body host: idle {self.idle_s}s, leaving", flush=True)
+                return
+            why = self.upgrader.tick(self.live(), self.asked()) if self.upgrader else None
+            if why:
+                print(f"body host: {why}", flush=True)
                 return
             self.time.sleep(SYNC_S)

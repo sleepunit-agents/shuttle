@@ -333,6 +333,26 @@ class Bodies(unittest.TestCase):
         (aid,) = self.runner.find(h, set())
         self.assertEqual(self.runner.list(strict=True), [{"id": aid, "status": "busy"}], "never read as gone")
 
+    def test_the_host_upgrades_only_when_nothing_is_live_or_asked(self):
+        ticks = []
+
+        class Up:
+            def tick(self, talking, waiting):
+                ticks.append((list(talking), list(waiting)))
+                return "behind" if not talking and not waiting else None
+        self.host.upgrader = Up()
+        self.host.wire.sync = lambda snap: {"req": {"0123456789abcdef": {"prompt": "p", "at": self.clock.t}}} if not ticks else {}
+        harness = self.harness
+
+        def sleep(_):   # each beat: the body finishes, and the test can't spin forever
+            assert len(ticks) < 20, ticks
+            for body in harness.bodies.values():
+                body["done"] = True
+        self.host.time = type("T", (), {"time": staticmethod(self.clock.time), "sleep": staticmethod(sleep)})()
+        self.host.run()
+        self.assertEqual(ticks[-1], ([], []), "left only once its body was done and nothing was asked")
+        self.assertTrue(any(t[0] for t in ticks), "not while its body was live")
+
     def test_a_malformed_report_is_cant_tell_not_a_crash(self):
         for bad in ({"at": "soon"}, {"at": 1000, "bodies": []}, {"at": 1000, "bodies": {"x": {"quiet_s": "q"}}},
                     {"at": 1000, "done": {"r": "x"}}, ["not", "a", "dict"], {"at": 1e308},
