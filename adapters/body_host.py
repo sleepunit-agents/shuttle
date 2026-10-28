@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from shuttle import bodies, inbox  # noqa: E402
 from shuttle import instance as shuttle_instance  # noqa: E402
 from shuttle import runner as shuttle_runner  # noqa: E402
+from shuttle import upgrade  # noqa: E402  stop when idle and behind, so a fresh house starts on new code
 
 
 class _Adapter:
@@ -58,7 +59,8 @@ def main(argv=None):
     local = shuttle_runner.KINDS[shuttle_runner.kind(inst)](type(inst)(inst.path, raw), b)
     b._runner = local
     host = bodies.Host(bodies.Wire(a.profile), local, inbox=inbox, cwd=inst.workdir, idle_s=a.idle_s,
-                       sent_log=inst.state_dir(a.bridge) / "sent.log", always_deny=inst.always_deny)
+                       sent_log=inst.state_dir(a.bridge) / "sent.log", always_deny=inst.always_deny,
+                       upgrader=upgrade.Upgrader([Path(__file__).resolve().parent.parent, inst.workdir]))
     print(f"{inst.agent_slug} body host {a.profile} up: idle-s={a.idle_s}", flush=True)
     host.run()
 
