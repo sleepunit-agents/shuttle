@@ -538,7 +538,11 @@ class Host:
         """The report, or None when the registry can't be read (then nothing is reported)."""
         listed = self.runner.list(strict=True)
         if listed is None:
-            return None
+            if self.mine or self.starting or self.resuming:
+                return None
+            # Nothing of mine to misread: "no bodies" is exactly true. (A fresh house's registry
+            # can't answer until its first body starts the daemon, and it never would if this waited.)
+            listed = []
         bodies, delivered = {}, {}
         for a in listed:
             aid = a.get("id")
@@ -577,6 +581,18 @@ class Host:
         if snap is not None:
             self.wire.put("host", snap)
             self.last_snap = snap
+        else:   # the registry can't be read: the last report, with what's changed since (claims, launches)
+            self._patch()
+
+    def _patch(self):
+        if self.last_snap is None:
+            return
+        # A body started since the last report is busy as far as anyone can tell: never "gone".
+        known = dict(self.last_snap.get("bodies") or {})
+        for aid in self.mine - set(known) - set(self.last_snap.get("ended") or {}):
+            known[aid] = {"status": "busy", "done": False, "parked": False, "quiet_s": 0, "last": None}
+        self.wire.put("host", dict(self.last_snap, at=self.time.time(), bodies=known, done=dict(self.done), starting={
+            r: {k: v for k, v in hh.items() if k != "before"} for r, hh in self.starting.items()}))
 
     def step(self):
         if not self._resumed and not self._resume():
@@ -640,9 +656,7 @@ class Host:
                               _merge([str(x) for x in r.get("deny") or []], self.always_deny), env, self.cwd)
         self.starting[rid] = h
         try:   # on record before the wait, cheaply (no registry read): a crash now finds it, never re-starts it
-            if self.last_snap is not None:
-                self.wire.put("host", dict(self.last_snap, at=self.time.time(), done=dict(self.done), starting={
-                    r: {k: v for k, v in hh.items() if k != "before"} for r, hh in self.starting.items()}))
+            self._patch()
         except Exception:
             pass
         ids = sorted(self.runner.claim(h, self.mine))
