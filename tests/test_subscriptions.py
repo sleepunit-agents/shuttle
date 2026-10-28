@@ -382,9 +382,11 @@ class Subscriptions(unittest.TestCase):
         from importlib.machinery import SourceFileLoader
         tool_mod = SourceFileLoader("loom_subscriptions_tool2", str(ROOT / "tools/loom-subscriptions")).load_module()
         ran = []
-        r = tool_mod.api_answer(subs.load(), {"caller": {"kind": "owner", "agents": ["someone"]}, "path": "run", "body": {"argv": ["issue", "robin", "anthropic"]}},
-                                lambda argv: ran.append(argv) or (0, "", ""))
-        self.assertEqual(r["status"], 403)
+        # issue gives a credential's value: never to a person who owns only some agents, theirs included.
+        for own in (["someone"], ["robin"]):
+            r = tool_mod.api_answer(subs.load(), {"caller": {"kind": "owner", "agents": own}, "path": "run", "body": {"argv": ["issue", "robin", "anthropic"]}},
+                                    lambda argv: ran.append(argv) or (0, "", ""))
+            self.assertEqual(r["status"], 403)
         self.assertEqual(ran, [])
 
     def test_the_page_and_its_actions(self):
