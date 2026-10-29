@@ -88,6 +88,11 @@ def check_block(t, b):
                 t.assertRegex(i["avatar"], r"^.{1,2}$")
             if "page" in i:
                 check_page_link(t, i["page"])
+            if "href" in i:
+                t.assertNotIn("page", i)
+                t.assertTrue(i["href"].startswith("https://"))
+    elif kind == "callout":
+        check_str(t, b["text"]), check_str(t, b.get("title", "")), check_tone(t, b)
     elif kind == "link":
         check_str(t, b["text"])
         if "page" in b:
@@ -249,7 +254,7 @@ class Page(Fixture):
     def test_talking_now_and_waiting(self):
         [lst] = self.section(self.page(), "talking")["blocks"]
         self.assertEqual(lst["items"], [
-            {"text": "Pat", "meta": "Chat · #general · active 4s, 2 queued", "tone": "ok"},
+            {"text": "Pat", "meta": "Chat · #general · active 4s, 2 queued", "tone": "ok", "page": "conv/c-1"},
             {"text": "Sam", "meta": "Chat · #b · waiting", "tone": "warn"},
         ])
 
@@ -267,7 +272,7 @@ class Page(Fixture):
         ])
         # Now: a row per conversation, talking or waiting (not a sentence under the tiles).
         self.assertEqual(now, {"type": "list", "items": [
-            {"text": "#general with Pat", "meta": "active 4s · 2 queued"},
+            {"text": "#general with Pat", "meta": "active 4s · 2 queued", "page": "conv/c-1"},
             {"text": "#b with Sam", "meta": "waiting: every body is busy", "tone": "warn"}]})
         self.assertEqual(len(p["sections"][0]["blocks"]), 1)   # no socket, no note; Now is its own card
         # Idle: the Bodies tile says so, and nothing hangs under the tiles.
@@ -305,8 +310,8 @@ class Page(Fixture):
         sec = self.section(self.page(), "conversations")
         self.assertTrue(sec["side"])
         self.assertEqual(sec["blocks"][0]["items"], [
-            {"text": "Pat", "meta": "Chat · #general · 2 turns", "avatar": "P"},
-            {"text": "Sam Lee", "meta": "Talk · DM · 1 turn", "avatar": "SL", "page": "loom:people/sam-lee"}])
+            {"text": "Pat", "meta": "Chat · #general · 2 turns", "avatar": "P", "page": "conv/c-1"},
+            {"text": "Sam Lee", "meta": "Talk · DM · 1 turn", "avatar": "SL", "page": "conv/c-2"}])
 
     def test_house_rules(self):
         rules = self.section(self.page(), "house-rules")
@@ -423,6 +428,88 @@ class PeopleLinks(Fixture):
 
 
 # ---------------------------------------------------------------- the command
+
+
+class Conversation(Fixture):
+    """A conversation's own page (conv/<cid>): what came of it, from its bodies'
+    `did` records, and its turns, from the board's events. Never its words."""
+
+    def setUp(self):
+        super().setUp()
+        self.people.write_text(json.dumps({"pat-lee": {"name": "Pat"}}))
+        t = NOW - 3600
+        self.events("2026-03", [
+            ev(t, "slack", "picked", cid="c-0007", chan="D1", venue="slack-dm", who=["Pat"], members=["pat-lee"], wait_s=12.0, body="abcd1234"),
+            ev(t + 30, "slack", "delivered", cid="c-0007", chan="D1", venue="slack-dm", who=["Pat"], n=1, body="abcd1234"),
+            ev(t + 95, "slack", "finished", cid="c-0007", chan="D1", venue="slack-dm", body="abcd1234", outcome="replied"),
+            ev(t + 96, "slack", "did", body="abcd1234", chan="D1", venue="slack-dm",
+               tasks=[{"id": "t-1682", "did": ["claim", "close"]}], prs=[{"ref": "acme/widgets#371", "did": "merged"}],
+               knowledge=[{"slug": "ours/site/notes", "did": "wrote"}], asks=[{"kind": "secret", "what": "github-token"}],
+               memories=2, files=3, commits=1, pushes=1, tools={"Bash": 8, "loom remember": 2},
+               cost={"usd": 0.9877, "ms": 89934, "started": 0, "added": 3, "removed": 1, "models": {"claude-opus-5-5": 0.9}}),
+            ev(t + 97, "slack", "did", body="ffff0000", tasks=[{"id": "t-9", "did": ["close"]}]),   # another conversation's body
+            ev(t + 200, "slack", "picked", cid="c-0008", chan="D2", venue="slack-dm", who=["Someone"], wait_s=1.0, body="ffff0000"),
+        ])
+
+    def test_what_came_of_it_and_its_turns(self):
+        page = loomui.page(self.view(), "conv/c-0007")
+        check_page(self, page)
+        self.assertEqual(page["title"], "Slack DM with Pat")
+        self.assertEqual(page["intro"], "1 turn since 11:00, the last 60m ago.")
+        came = next(s for s in page["sections"] if s["id"] == "came-of-it")
+        items = came["blocks"][0]["items"]
+        self.assertEqual([(i["text"], i.get("page") or i.get("href")) for i in items], [
+            ("t-1682", "loom:p/tasks/task/t-1682"),
+            ("acme/widgets#371", "https://github.com/acme/widgets/pull/371"),
+            ("ours/site/notes", "loom:knowledge/ours/site/notes"),
+            ("Asked for a token: github-token", "loom:inbox")])
+        self.assertEqual(items[0]["meta"], "Task · claimed, closed")
+        self.assertEqual(came["blocks"][1]["text"], "2 memories saved · 3 files changed · 1 commit · 1 push.")
+        self.assertNotIn("t-9", json.dumps(page))          # only this conversation's bodies
+        work = {i["label"]: i["value"] for i in next(s for s in page["sections"] if s["id"] == "work")["blocks"][0]["items"]}
+        self.assertEqual((work["Time worked"], work["Cost"], work["Lines"], work["Models"]), ("89s", "$0.99", "+3 −1", "opus-5-5"))
+        who = next(s for s in page["sections"] if s["id"] == "who")["blocks"][0]["items"]
+        self.assertEqual(who, [{"text": "Pat", "avatar": "P", "page": "loom:people/pat-lee"}])
+        turns = next(s for s in page["sections"] if s["id"] == "turns")["blocks"][0]
+        self.assertEqual(turns["rows"], [["11:00", "12s", "1m", "Replied", "1"]])
+
+    def test_its_rows_link_to_it(self):
+        page = loomui.page(self.view(), "")
+        rows = next(s for s in page["sections"] if s["id"] == "conversations")["blocks"][0]["items"]
+        self.assertEqual({r["text"]: r.get("page") for r in rows}, {"Pat": "conv/c-0007", "Someone": "conv/c-0008"})
+
+    def test_live_and_its_doing_link_to_it(self):
+        self.write(snap("slack", NOW - 5, talking=[{"cid": "c-0007", "venue": "slack-dm", "who": ["Pat"], "active_s": 40, "body": "abcd1234"}]))
+        view = self.view()
+        page = loomui.page(view, "conv/c-0007")
+        self.assertEqual(page["sections"][0]["blocks"][0]["title"], "Talking now")
+        self.assertEqual([d.get("page") for d in loomui._doing(view)], ["conv/c-0007"])
+
+    def test_before_any_record_it_says_so(self):
+        self.events("2026-03", [ev(NOW - 60, "discord", "picked", cid="c-0009", chan="C", venue="#general", who=["Ann"], wait_s=2.0, body="12345678")])
+        page = loomui.page(self.view(), "conv/c-0009")
+        self.assertEqual(page["title"], "#general on Discord")
+        came = next(s for s in page["sections"] if s["id"] == "came-of-it")
+        self.assertIn("Nothing recorded yet", came["blocks"][0]["text"])
+
+    def test_a_bad_record_never_breaks_the_page(self):
+        """A did record is a body's word: junk in it is skipped, a bad slug isn't a link, and a record from
+        another bridge's body with the same id isn't this conversation's."""
+        self.events("2026-03", [
+            ev(NOW - 3000, "slack", "did", body="abcd1234", memories="lots", files=None, tools=["Bash"], tasks="t-1",
+               knowledge=[{"slug": "../../act/x?y", "did": "wrote"}, {"slug": "ok/page", "did": "wrote"}],
+               cost={"usd": "NaN", "ms": "x", "models": ["a"]}),
+            ev(NOW - 2999, "discord", "did", body="abcd1234", tasks=[{"id": "t-666", "did": ["close"]}]),
+        ])
+        page = loomui.page(self.view(), "conv/c-0007")
+        check_page(self, page)
+        items = next(s for s in page["sections"] if s["id"] == "came-of-it")["blocks"][0]["items"]
+        self.assertEqual([(i["text"], i.get("page")) for i in items], [("../../act/x?y", None), ("ok/page", "loom:knowledge/ok/page")])
+        self.assertNotIn("t-666", json.dumps(page))
+
+    def test_unknown_or_malformed_is_not_found(self):
+        for p in ("conv/c-4242", "conv/../x", "conv/"):
+            self.assertEqual(loomui.page(self.view(), p)["title"], "Not found")
 
 
 class Entry(unittest.TestCase):

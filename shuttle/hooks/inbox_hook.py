@@ -102,7 +102,22 @@ def handle(hook, instance=None, fallback=None, env=None):
         return {"decision": "block", "reason": render(items, venue) + "\nHandle these before you end."}
     if (hook.get("background_tasks") or hook.get("session_crons")) and not hook.get("stop_hook_active"):
         return {"decision": "block", "reason": PARKED}
+    # The turn ends: what the body did, for its conversation's page (shuttle/deeds.py).
+    _deeds(sid, hook, instance, env)
     return None
+
+
+def _deeds(sid, hook, instance, env):
+    from shuttle import deeds, nowlog
+    env = os.environ if env is None else env
+    path = env.get("SHUTTLE_INSTANCE") or instance
+    if path and not env.get("SHUTTLE_NOW_DIR"):
+        try:
+            from shuttle import instance as inst
+            nowlog.configure(now_dir=inst.load(path).now_dir)
+        except (SystemExit, Exception):  # noqa: BLE001 - the board is best effort
+            pass
+    deeds.record(sid, hook.get("transcript_path"), inbox.meta(sid), env)
 
 
 def run(instance=None, fallback=None, label="inbox-hook", stdin=None, stdout=None, stderr=None):
