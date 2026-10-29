@@ -58,6 +58,7 @@ from shuttle import upgrade  # noqa: E402  stop when idle and behind, so a fresh
 from shuttle import gates  # noqa: E402  the agent's people, from loom once loom has them
 from shuttle import dispatch as shuttle_dispatch  # noqa: E402
 from shuttle import spawn as shuttle_spawn  # noqa: E402
+from shuttle import reach  # noqa: E402  the names people go by, for their cards
 from shuttle import selvedge as shuttle_selvedge  # noqa: E402
 from shuttle import runner as shuttle_runner  # noqa: E402  the harness bodies run on (t-1438)
 from shuttle.config import Config as ShuttleConfig  # noqa: E402
@@ -611,10 +612,12 @@ def spawn_gate(state, people, uid):
     (a leftover or a retry), re-checked before it reaches a body again:
     ("ok", person) | ("wait", why) for a users.info failure (keep it a while) |
     ("drop", why) for a real no (stranger, guest, unregistered, tier < 2)."""
-    ok, reason, _profile = user_verdict(state, uid)
+    ok, reason, profile = user_verdict(state, uid)
     if not ok:
         return ("wait" if str(reason or "").startswith("users.info failed") else "drop"), reason
     p = people.get(uid)
+    if p:   # someone people.json knows: the name Slack shows, for their card (shuttle/reach.py)
+        reach.seen("slack", "slack", uid, p[0], reach.label(profile.get("real_name"), profile.get("name")))
     if not p or not may_wake(p[1])[0]:   # the one gate (t-1423 step 5): tier 2+ on Slack
         return "drop", "not registered at tier 2+"
     return "ok", p
