@@ -16,6 +16,7 @@ the board. loom renders it; installing the shuttle is all it takes.
 """
 from datetime import datetime, timezone
 import json
+import re
 import statistics
 import time
 from pathlib import Path
@@ -23,6 +24,8 @@ from pathlib import Path
 DAY = 86400
 RECONNECT_QUICK_S = 60      # a socket back up within this is a rotation, not an outage
 LIST_ROWS = 200             # the contract's limit for a list's items
+CID = re.compile(r"c-\d{1,8}")   # a conversation id, as nowlog mints them
+CONV_DAYS = 45              # how far back a conversation's page reads
 
 
 # A bridge is dark after this long without a snapshot: 3 intervals, at least
@@ -222,8 +225,10 @@ class View:
                 except (TypeError, ValueError):
                     pass
                 key = (r["bridge"], str(r.get("venue") or "?"), tuple(who))
-                c = convs.setdefault(key, {"turns": 0, "last": 0, "members": set()})
+                c = convs.setdefault(key, {"turns": 0, "last": 0, "members": set(), "cid": None})
                 c["turns"] += 1
+                if t >= c["last"] and CID.fullmatch(str(cid or "")):
+                    c["cid"] = cid
                 c["last"] = max(c["last"], t)
                 c["members"].update(m for m in (r.get("members") or []) if _slug_ok(m))
             elif kind == "delivered" and t >= self.midnight:
@@ -280,6 +285,8 @@ def _doing(view):
             bits = [_title(b["name"]) + (f" {where}" if where in ("DM", "group DM") else ""),
                     f"active {_ago(t.get('active_s') or 0)} ago"] + (["stalled"] if t.get("stalled") else [])
             d = {"text": text[:100], "kind": "talk", "where": " · ".join(bits)}
+            if CID.fullmatch(str(t.get("cid") or "")):
+                d["page"] = f"conv/{t['cid']}"
             since = t.get("body_since")
             if isinstance(since, (int, float)) and since > 0:
                 d["since"] = datetime.fromtimestamp(since, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -322,10 +329,14 @@ NOT_FOUND = {"title": "Not found", "sections": []}
 
 def page(view, path, query=None):
     """"": one row a bridge (the board's shape), who's talking now, the last
-    24h's conversations; "bridge/<name>": that bridge's numbers."""
+    24h's conversations; "bridge/<name>": that bridge's numbers; "conv/<cid>":
+    one conversation, what came of it and its turns."""
     if path.startswith("bridge/"):
         b = next((b for b in view.bridges if b["name"] == path[len("bridge/"):]), None)
         return _bridge_page(view, b) if b else dict(NOT_FOUND)
+    if path.startswith("conv/"):
+        cid = path[len("conv/"):]
+        return _conv_page(view, cid) if CID.fullmatch(cid) else dict(NOT_FOUND)
     if path != "":
         return dict(NOT_FOUND)
     caps = {(b["snap"].get("slots") or {}).get("cap") for b in view.bridges}
@@ -389,7 +400,7 @@ def _talking(view):
             bits = [f"active {_ago(t.get('active_s') or 0)}"] + (["stalled"] if t.get("stalled") else []) \
                 + ([f"{t['queued']} queued"] if t.get("queued") else [])
             items.append({"text": who, "meta": f"{_title(b['name'])} · {_where(b['name'], t.get('venue'))} · {', '.join(bits)}",
-                          "tone": "warn" if t.get("stalled") else "ok"})
+                          "tone": "warn" if t.get("stalled") else "ok", **_conv_link(t)})
         for w in b["snap"].get("waiting") or []:
             who = ", ".join(w.get("who") or []) or "nobody named"
             items.append({"text": who, "meta": f"{_title(b['name'])} · {_where(b['name'], w.get('venue'))} · waiting", "tone": "warn"})
@@ -469,7 +480,8 @@ def _now_rows(b):
             bits.append(f"{t['queued']} queued")
         if t.get("stalled"):
             bits.append("stalled")
-        rows.append({"text": f"{_where(b['name'], t.get('venue'))} with {who}", "meta": " · ".join(bits), **({"tone": "warn"} if t.get("stalled") else {})})
+        rows.append({"text": f"{_where(b['name'], t.get('venue'))} with {who}", "meta": " · ".join(bits),
+                     **({"tone": "warn"} if t.get("stalled") else {}), **_conv_link(t)})
     for w in b["snap"].get("waiting") or []:
         who = ", ".join(w.get("who") or []) or "nobody named"
         why = {"slots_full": "every body is busy"}.get(w.get("reason"), w.get("reason") or "")
@@ -525,7 +537,10 @@ def _conversations(view, only=None):
         item = {"text": text, "meta": f"{_title(bridge)} · {_where(bridge, venue)} · {_plural(c['turns'], 'turn')}"}
         if len(who) == 1:
             item["avatar"] = _initials(who[0])
-        if isinstance(cell, dict):
+        # The conversation's own page (its person is a link there); its person's when there's no id to go by.
+        if c.get("cid"):
+            item["page"] = f"conv/{c['cid']}"
+        elif isinstance(cell, dict):
             item["page"] = cell["page"]
         items.append(item)
     if not items:
@@ -569,3 +584,193 @@ def _rules(rules):
         ]},
         {"type": "text", "text": "Set in the shuttle instance file, not here.", "tone": "muted"},
     ]}
+
+
+# ---------------------------------------------------------------- a conversation
+
+
+def _conv_link(t):
+    cid = str(t.get("cid") or "")
+    return {"page": f"conv/{cid}"} if CID.fullmatch(cid) else {}
+
+
+def _months(since, now):
+    """Every month's events file from since to now, oldest first."""
+    names, t = [], since
+    while True:
+        name = time.strftime("events-%Y-%m.jsonl", time.localtime(t))
+        if name not in names:
+            names.append(name)
+        if t >= now:
+            return names
+        t = min(t + 86400 * 27, now)
+
+
+def _conv_records(now_dir, cid, since, now):
+    """This conversation's turns (picked, finished, delivered) and the `did`
+    records of the bodies that served it, in order."""
+    turns, did = [], {}
+    bodies = set()
+    for name in _months(since, now):
+        try:
+            f = open(Path(now_dir) / name, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    t = float(r["t"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if not (since <= t <= now) or not isinstance(r, dict):
+                    continue
+                kind = r.get("kind")
+                if r.get("cid") == cid and kind in ("picked", "finished", "delivered"):
+                    turns.append(r)
+                    if isinstance(r.get("body"), str):
+                        bodies.add(r["body"][:8])
+                elif kind == "did" and isinstance(r.get("body"), str):
+                    did[r["body"][:8]] = r      # the latest is the whole session so far
+    return turns, {b: did[b] for b in bodies if b in did}
+
+
+def _verbs(v):
+    words = {"claim": "claimed", "close": "closed", "create": "created", "comment": "commented on",
+             "update": "updated", "reopen": "reopened", "link": "linked", "unlink": "unlinked"}
+    return ", ".join(words.get(x, x) for x in (v if isinstance(v, list) else [v]))
+
+
+def _minutes(ms):
+    s = max(int(ms or 0) // 1000, 0)
+    return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h {s % 3600 // 60}m"
+
+
+def _came_of_it(did):
+    """What the bodies did, together: a row each for its tasks, pull requests,
+    knowledge and asks; the rest as a line."""
+    tasks, prs, know, asks = {}, {}, {}, []
+    memories = files = commits = pushes = 0
+    for d in did.values():
+        for x in d.get("tasks") or []:
+            if isinstance(x, dict) and re.fullmatch(r"t-\d+", str(x.get("id"))):
+                tasks.setdefault(x["id"], [])
+                tasks[x["id"]] += [v for v in (x.get("did") or []) if v not in tasks[x["id"]]]
+        for x in d.get("prs") or []:
+            ref = str(x.get("ref") if isinstance(x, dict) else "")
+            if re.fullmatch(r"[\w.-]+/[\w.-]+#\d+", ref) and prs.get(ref) != "merged":
+                prs[ref] = x.get("did") or "opened"
+        for x in d.get("knowledge") or []:
+            if isinstance(x, dict) and isinstance(x.get("slug"), str):
+                know.setdefault(x["slug"], x.get("did") or "wrote")
+        asks += [x for x in d.get("asks") or [] if isinstance(x, dict)]
+        memories += int(d.get("memories") or 0)
+        files += int(d.get("files") or 0)
+        commits += int(d.get("commits") or 0)
+        pushes += int(d.get("pushes") or 0)
+    items = []
+    for tid, v in tasks.items():
+        items.append({"text": tid, "meta": f"Task · {_verbs(v) or 'touched'}", "page": f"loom:p/tasks/task/{tid}"})
+    for ref, v in prs.items():
+        repo, n = ref.split("#")
+        items.append({"text": ref, "meta": f"Pull request · {v}", "href": f"https://github.com/{repo}/pull/{n}"})
+    for slug, v in know.items():
+        items.append({"text": slug, "meta": f"Knowledge · {'wrote' if v == 'wrote' else 'checked'}", "page": f"loom:knowledge/{slug}"})
+    for a in asks:
+        what = str(a.get("what") or "")[:80]
+        text = f"Asked for a token: {what}" if a.get("kind") == "secret" else f"Asked for your OK: {what}"
+        items.append({"text": text, "meta": "In the Inbox", "page": "loom:inbox"})
+    line = [x for x in (memories and f"{memories} {'memory' if memories == 1 else 'memories'} saved",
+                        files and _plural(files, "file") + " changed",
+                        commits and _plural(commits, "commit"), pushes and f"{pushes} push{'' if pushes == 1 else 'es'}") if x]
+    return items, line
+
+
+def _conv_page(view, cid):
+    now = view.now
+    turns, did = _conv_records(view.now_dir, cid, now - CONV_DAYS * 86400, now)
+    live = next(((b, t) for b in view.bridges if not b["dark"] for t in b["snap"].get("talking") or [] if t.get("cid") == cid), None)
+    if not turns and not live:
+        return {"title": "Not found", "sections": []}
+    picked = [r for r in turns if r.get("kind") == "picked"]
+    first = picked[0] if picked else (turns[0] if turns else {})
+    last = picked[-1] if picked else first
+    bridge = (live[0]["name"] if live else first.get("bridge")) or "?"
+    venue = (live[1].get("venue") if live else last.get("venue")) or first.get("venue")
+    who = [w for w in ((live[1].get("who") if live else None) or last.get("who") or []) if isinstance(w, str)]
+    # Everyone who spoke in it, most turns first: a channel's "who" is only the turn's.
+    spoke = {}
+    for r in picked:
+        for w in r.get("who") or []:
+            if isinstance(w, str):
+                spoke[w] = spoke.get(w, 0) + 1
+    everyone = sorted(spoke, key=lambda w: -spoke[w]) or who
+    where = _where(bridge, venue)
+    title = (f"{_title(bridge)} {where} with {', '.join(who)}" if where in ("DM", "group DM") and who
+             else f"{where} on {_title(bridge)}" if where != "?" else f"A conversation on {_title(bridge)}")
+    when = [r["t"] for r in picked]
+    intro = (f"{_plural(len(picked), 'turn')} since {_clock(when[0], now)}, the last {_ago(now - when[-1])} ago."
+             if when else "No turns in the last %d days." % CONV_DAYS)
+    sections = []
+    if live:
+        t = live[1]
+        bits = [f"active {_ago(t.get('active_s') or 0)} ago"] + (["stalled"] if t.get("stalled") else []) \
+            + ([f"{t['queued']} queued"] if t.get("queued") else [])
+        sections.append({"id": "now", "blocks": [{"type": "callout", "tone": "warn" if t.get("stalled") else "ok",
+                                                  "title": "Talking now", "text": " · ".join(bits)}]})
+    items, line = _came_of_it(did)
+    blocks = []
+    if items:
+        blocks.append({"type": "list", "items": items[:LIST_ROWS]})
+    if line:
+        blocks.append({"type": "text", "text": " · ".join(line).capitalize() + "."})
+    if not blocks:
+        blocks.append({"type": "text", "tone": "muted", "text": (
+            "Nothing it did is recorded: no tasks, pull requests, knowledge or asks." if did else
+            "Nothing recorded yet. A body says what it did when its turn ends; turns before that don't.")})
+    sections.append({"id": "came-of-it", "title": "What came of it", "blocks": blocks})
+    costs = [d["cost"] for d in did.values() if isinstance(d.get("cost"), dict)]
+    if costs or did:
+        tools = {}
+        for d in did.values():
+            for k, n in (d.get("tools") or {}).items():
+                tools[k] = tools.get(k, 0) + int(n or 0)
+        models = sorted({m for c in costs for m in (c.get("models") or {})})
+        kv = []
+        if costs:
+            kv.append({"label": "Time worked", "value": _minutes(sum(int(c.get("ms") or 0) for c in costs))})
+            kv.append({"label": "Cost", "value": f"${sum(float(c.get('usd') or 0) for c in costs):.2f}"})
+            lines = [(int(c.get("added") or 0), int(c.get("removed") or 0)) for c in costs]
+            if any(a or r for a, r in lines):
+                kv.append({"label": "Lines", "value": f"+{sum(a for a, _ in lines)} −{sum(r for _, r in lines)}"})
+        if models:
+            kv.append({"label": "Models", "value": ", ".join(m.replace("claude-", "") for m in models)})
+        kv.append({"label": "Bodies", "value": str(len(did))})
+        if tools:
+            top = sorted(tools.items(), key=lambda kv_: -kv_[1])[:6]
+            kv.append({"label": "Tools", "value": " · ".join(f"{k} {n}" for k, n in top)})
+        sections.append({"id": "work", "title": "The work", "side": True, "blocks": [{"type": "kv", "items": kv}]})
+    people = _people(view.people_file) if view.people_file else {}
+    members = {m for r in picked for m in (r.get("members") or []) if _slug_ok(m)}
+    whom = []
+    for w in everyone[:20]:
+        slug = next(iter(members)) if len(everyone) == 1 and len(members) == 1 else people.get(w)
+        whom.append({"text": w, "avatar": _initials(w), **({"page": f"loom:people/{slug}"} if slug and _slug_ok(slug) else {})})
+    if whom:
+        sections.append({"id": "who", "title": "With", "side": True, "blocks": [{"type": "list", "items": whom}]})
+    rows = []
+    for i, p in enumerate(picked):
+        body = str(p.get("body") or "")[:8]
+        end = next((r for r in turns if r.get("kind") == "finished" and str(r.get("body") or "")[:8] == body
+                    and r["t"] >= p["t"] and (i + 1 >= len(picked) or r["t"] <= picked[i + 1]["t"] + 1)), None)
+        sent = sum(int(r.get("n") or 1) for r in turns if r.get("kind") == "delivered" and str(r.get("body") or "")[:8] == body
+                   and r["t"] >= p["t"] and (end is None or r["t"] <= end["t"] + 5))
+        wait = p.get("wait_s")
+        rows.append([_clock(p["t"], now), _secs(wait) if isinstance(wait, (int, float)) else "—",
+                     _minutes((end["t"] - p["t"]) * 1000) if end else ("working" if live else "—"),
+                     {"replied": "Replied", "reaped": "Stopped (stuck)"}.get(end.get("outcome"), end.get("outcome") or "") if end else "",
+                     str(sent) if sent else ""])
+    if rows:
+        sections.append({"id": "turns", "title": "Turns", "blocks": [{"type": "table",
+                         "columns": ["When", "Waited", "Took", "Ended", "Sent"], "rows": list(reversed(rows))[:LIST_ROWS]}]})
+    return {"title": title[:120], "intro": intro, "sections": sections}
