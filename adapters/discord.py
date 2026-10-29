@@ -41,6 +41,7 @@ from shuttle import upgrade  # noqa: E402  stop when idle and behind, so a fresh
 from shuttle import gates  # noqa: E402  the agent's people, from loom once loom has them
 from shuttle import dispatch as shuttle_dispatch  # noqa: E402
 from shuttle import spawn as shuttle_spawn  # noqa: E402
+from shuttle import reach  # noqa: E402  the names people go by, for their cards
 from shuttle import selvedge as shuttle_selvedge  # noqa: E402
 from shuttle import runner as shuttle_runner  # noqa: E402  the harness bodies run on (t-1438)
 from shuttle.config import Config as ShuttleConfig  # noqa: E402
@@ -700,6 +701,9 @@ def who(author):
     """Render an author as 'username [Pat]' or 'username [UNKNOWN id=…]'."""
     name = author.get("username", "?")
     uid = author.get("id", "")
+    if uid in WHO:   # someone people.json knows: the name Discord shows, for their card (shuttle/reach.py)
+        reach.seen("discord", "discord", uid, WHO[uid][0],
+                   reach.label(author.get("global_name"), author.get("username"), bool(author.get("bot"))))
     known = (PEOPLE.get(uid)
              or (f"{WEBHOOK_PEERS[uid]} (peer agent via webhook)" if uid in WEBHOOK_PEERS and author.get("bot") else None))
     return f"{name} [{known}]" if known else f"{name} [UNKNOWN id={uid}]"
