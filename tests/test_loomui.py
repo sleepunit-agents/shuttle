@@ -414,8 +414,8 @@ class PeopleLinks(Fixture):
         rows = self.rows([self.picked("#a", ["Mark (peer agent bot)"]), self.picked("#b", ["Gabe"]),
                           self.picked("#c", ["Gabe (agent)"])], people)
         self.assertEqual(sorted((r[1]["text"], r[1]["page"]) for r in rows),
-                         [("Gabe", "loom:people/gabe"), ("Gabe (agent)", "loom:people/gabe"),
-                          ("Mark (peer agent bot)", "loom:people/mark")])
+                         [("Gabe", "loom:people/gabe"), ("Gabe", "loom:people/gabe"),
+                          ("Mark", "loom:people/mark")])      # an agent by its name, never the label a body sees
 
     def test_a_group_is_not_linked(self):
         rows = self.rows([self.picked("chat-group", ["Pat", "Sam"], members=["pat", "sam"])])
@@ -446,7 +446,8 @@ class Conversation(Fixture):
 
     def setUp(self):
         super().setUp()
-        self.people.write_text(json.dumps({"pat-lee": {"name": "Pat"}}))
+        self.people.write_text(json.dumps({"people": {"pat-lee": {"name": "Pat"}},
+                                           "agents": {"kit": {"name": "Kit", "kind": "peer agent bot"}}}))
         t = NOW - 3600
         self.events("2026-03", [
             ev(t, "slack", "picked", cid="c-0007", chan="D1", venue="slack-dm", who=["Pat"], members=["pat-lee"], wait_s=12.0, body="abcd1234"),
@@ -459,13 +460,15 @@ class Conversation(Fixture):
                cost={"usd": 0.9877, "ms": 89934, "started": 0, "added": 3, "removed": 1, "models": {"claude-opus-5-5": 0.9}}),
             ev(t + 97, "slack", "did", body="ffff0000", tasks=[{"id": "t-9", "did": ["close"]}]),   # another conversation's body
             ev(t + 200, "slack", "picked", cid="c-0008", chan="D2", venue="slack-dm", who=["Someone"], wait_s=1.0, body="ffff0000"),
+            ev(t + 300, "discord", "picked", cid="c-0010", chan="C9", venue="#general", who=["Pat"], members=["pat-lee"], wait_s=3.0, body="11112222"),
+            ev(t + 400, "discord", "picked", cid="c-0010", chan="C9", venue="#general", who=["Kit (peer agent bot)"], wait_s=4.0, body="33334444"),
         ])
 
     def test_what_came_of_it_and_its_turns(self):
-        page = loomui.page(self.view(), "conv/c-0007")
+        page = loomui.page(self.view(agent_slug="robin"), "conv/c-0007")
         check_page(self, page)
         self.assertEqual(page["title"], "Slack DM with Pat")
-        self.assertEqual(page["intro"], "1 turn since Mar 1, 11:00 AM, the last 60m ago.")
+        self.assertEqual(page["intro"], "Robin has answered 1 turn here since Mar 1, 11:00 AM, the last 60m ago.")
         came = next(s for s in page["sections"] if s["id"] == "came-of-it")
         items = came["blocks"][0]["items"]
         self.assertEqual([(i["text"], i.get("page") or i.get("href")) for i in items], [
@@ -479,14 +482,26 @@ class Conversation(Fixture):
         work = {i["label"]: i["value"] for i in next(s for s in page["sections"] if s["id"] == "work")["blocks"][0]["items"]}
         self.assertEqual((work["Time worked"], work["Cost"], work["Lines"], work["Models"]), ("89s", "$0.99", "+3 −1", "opus-5-5"))
         who = next(s for s in page["sections"] if s["id"] == "who")["blocks"][0]["items"]
-        self.assertEqual(who, [{"text": "Pat", "avatar": "P", "page": "loom:people/pat-lee"}])
+        self.assertEqual(who, [{"text": "Robin", "agent": "robin", "meta": "Answers here", "page": "loom:a/robin"},
+                               {"text": "Pat", "avatar": "P", "page": "loom:people/pat-lee"}])
         turns = next(s for s in page["sections"] if s["id"] == "turns")["blocks"][0]
-        self.assertEqual(turns["rows"], [["Mar 1, 11:00 AM", "12s", "1m", "Replied", "1"]])
+        self.assertEqual(turns["columns"], ["When", "From", "Waited", "Took", "Ended", "Sent"])
+        self.assertEqual(turns["rows"], [["Mar 1, 11:00 AM", "Pat", "12s", "1m", "Replied", "1"]])
+
+    def test_whose_it_is_and_a_peer_agent_as_itself(self):
+        page = loomui.page(self.view(agent_slug="robin"), "conv/c-0010")
+        check_page(self, page)
+        who = next(s for s in page["sections"] if s["id"] == "who")["blocks"][0]["items"]
+        self.assertEqual([(i["text"], i.get("agent"), i.get("meta")) for i in who],
+                         [("Robin", "robin", "Answers here"), ("Pat", None, None), ("Kit", "kit", "Peer agent")])
+        rows = next(s for s in page["sections"] if s["id"] == "turns")["blocks"][0]["rows"]
+        self.assertEqual([r[1] for r in rows], ["Kit", "Pat"])       # newest first; Kit by name, not its label
 
     def test_its_rows_link_to_it(self):
         page = loomui.page(self.view(), "")
         rows = next(s for s in page["sections"] if s["id"] == "conversations")["blocks"][0]["items"]
-        self.assertEqual({r["text"]: r.get("page") for r in rows}, {"Pat": "conv/c-0007", "Someone": "conv/c-0008"})
+        self.assertEqual({(r["text"], r.get("page")) for r in rows}, {("Pat", "conv/c-0007"), ("Someone", "conv/c-0008"),
+                                                                     ("Pat", "conv/c-0010"), ("Kit", "conv/c-0010")})
 
     def test_live_and_its_doing_link_to_it(self):
         self.write(snap("slack", NOW - 5, talking=[{"cid": "c-0007", "venue": "slack-dm", "who": ["Pat"], "active_s": 40, "body": "abcd1234"}]))

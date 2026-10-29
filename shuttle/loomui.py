@@ -26,6 +26,7 @@ RECONNECT_QUICK_S = 60      # a socket back up within this is a rotation, not an
 LIST_ROWS = 200             # the contract's limit for a list's items
 CID = re.compile(r"c-\d{1,8}")   # a conversation id, as nowlog mints them
 CONV_DAYS = 45              # how far back a conversation's page reads
+AGENT_ID = re.compile(r"[a-z][a-z0-9-]{0,39}")   # loom's agent id: what a list row's `agent` may be
 
 
 # A bridge is dark after this long without a snapshot: 3 intervals, at least
@@ -162,6 +163,21 @@ def _people(path):
                 for n in {name, f"{name} ({rec.get('kind') or 'agent'})"} if is_agent else {name}:
                     by_name.setdefault(n, set()).add(slug)
     return {name: next(iter(slugs)) for name, slugs in by_name.items() if len(slugs) == 1}
+
+
+def _peer_agents(path):
+    """{the label a body sees: (slug, name)} for people.json's agents: "Mark" and "Mark (peer agent bot)" are Mark."""
+    try:
+        doc = json.loads(Path(path).read_text())
+    except (OSError, ValueError, TypeError):
+        return {}
+    agents = doc.get("agents") if isinstance(doc, dict) and isinstance(doc.get("agents"), dict) else {}
+    out = {}
+    for slug, rec in agents.items():
+        if isinstance(rec, dict) and not slug.startswith("_") and _slug_ok(slug) and isinstance(rec.get("name"), str) and rec["name"]:
+            for label in (rec["name"], f"{rec['name']} ({rec.get('kind') or 'agent'})"):
+                out[label] = (slug, rec["name"])
+    return out
 
 
 def _slug_ok(slug):
@@ -528,12 +544,13 @@ def _socket_note(changes, bridge):
 def _conversations(view, only=None):
     st = view.stats()
     people = _people(view.people_file) if view.people_file else {}
+    peers = _peer_agents(view.people_file) if view.people_file else {}
     items = []
     for (bridge, venue, who), c in sorted(st["convs"].items(), key=lambda kv: (-kv[1]["turns"], -kv[1]["last"])):
         if only and bridge != only:
             continue
         cell = _who_cell(who, c["members"], people)
-        text = cell["text"] if isinstance(cell, dict) else cell
+        text = ", ".join(peers[w][1] if w in peers else w for w in who) or (cell["text"] if isinstance(cell, dict) else cell)
         item = {"text": text, "meta": f"{_title(bridge)} · {_where(bridge, venue)} · {_plural(c['turns'], 'turn')}"}
         if len(who) == 1:
             item["avatar"] = _initials(who[0])
@@ -733,8 +750,9 @@ def _conv_page(view, cid):
     title = (f"{_title(bridge)} {where} with {', '.join(who)}" if where in ("DM", "group DM") and who
              else f"{where} on {_title(bridge)}" if where != "?" else f"A conversation on {_title(bridge)}")
     when = [r["t"] for r in picked]
-    intro = (f"{_plural(len(picked), 'turn')} since {_clock(when[0], now)}, the last {_ago(now - when[-1])} ago."
-             if when else "No turns in the last %d days." % CONV_DAYS)
+    agent = view.agent_name or "The agent"
+    intro = (f"{agent} has answered {_plural(len(picked), 'turn')} here since {_clock(when[0], now)}, the last {_ago(now - when[-1])} ago."
+             if when else f"{agent} has had no turns here in the last {CONV_DAYS} days.")
     sections = []
     if live:
         t = live[1]
@@ -775,11 +793,21 @@ def _conv_page(view, cid):
             kv.append({"label": "Tools", "value": " · ".join(f"{k} {n}" for k, n in top)})
         sections.append({"id": "work", "title": "The work", "side": True, "blocks": [{"type": "kv", "items": kv}]})
     people = _people(view.people_file) if view.people_file else {}
+    peers = _peer_agents(view.people_file) if view.people_file else {}
     members = {m for r in picked for m in (r.get("members") or []) if _slug_ok(m)}
+    # Whose conversation it is first, in its own colour: the page is reached from Bridges as often as from the agent.
     whom = []
-    for w in everyone[:20]:
-        slug = next(iter(members)) if len(everyone) == 1 and len(members) == 1 else people.get(w)
+    if view.agent_slug and AGENT_ID.fullmatch(view.agent_slug):
+        whom.append({"text": view.agent_name or view.agent_slug, "agent": view.agent_slug, "meta": "Answers here",
+                     "page": f"loom:a/{view.agent_slug}"})
+    humans = [w for w in everyone if w not in peers]
+    for w in humans[:20]:
+        slug = next(iter(members)) if len(humans) == 1 and len(members) == 1 else people.get(w)
         whom.append({"text": w, "avatar": _initials(w), **({"page": f"loom:people/{slug}"} if slug and _slug_ok(slug) else {})})
+    for w in [w for w in everyone if w in peers][:10]:
+        slug, name = peers[w]
+        whom.append({"text": name, "meta": "Peer agent", "page": f"loom:people/{slug}",
+                     **({"agent": slug} if AGENT_ID.fullmatch(slug) else {"avatar": _initials(name)})})
     if whom:
         sections.append({"id": "who", "title": "With", "side": True, "blocks": [{"type": "list", "items": whom}]})
     rows = []
@@ -790,11 +818,12 @@ def _conv_page(view, cid):
         sent = sum(int(r.get("n") or 1) for r in turns if r.get("kind") == "delivered" and str(r.get("body") or "")[:8] == body
                    and r["t"] >= p["t"] and (end is None or r["t"] <= end["t"] + 5))
         wait = p.get("wait_s")
-        rows.append([_clock(p["t"], now), _secs(wait) if isinstance(wait, (int, float)) else "—",
+        frm = ", ".join(peers[w][1] if w in peers else w for w in (p.get("who") or []) if isinstance(w, str)) or "—"
+        rows.append([_clock(p["t"], now), frm[:60], _secs(wait) if isinstance(wait, (int, float)) else "—",
                      _minutes((end["t"] - p["t"]) * 1000) if end else ("working" if live else "—"),
                      {"replied": "Replied", "reaped": "Stopped (stuck)"}.get(end.get("outcome"), end.get("outcome") or "") if end else "",
                      str(sent) if sent else ""])
     if rows:
         sections.append({"id": "turns", "title": "Turns", "blocks": [{"type": "table",
-                         "columns": ["When", "Waited", "Took", "Ended", "Sent"], "rows": list(reversed(rows))[:LIST_ROWS]}]})
+                         "columns": ["When", "From", "Waited", "Took", "Ended", "Sent"], "rows": list(reversed(rows))[:LIST_ROWS]}]})
     return {"title": title[:120], "intro": intro, "sections": sections}
