@@ -187,7 +187,7 @@ class Manifest(Fixture):
         self.assertEqual(m["tile"]["value"], "1 live")
         self.assertEqual(m["tile"]["tone"], "bad")
         [ask] = m["asks"]
-        self.assertEqual(ask["text"], "Talk bridge is dark since " + time.strftime("%H:%M", time.localtime(dark_at)))
+        self.assertEqual(ask["text"], "Talk bridge is dark since " + loomui._clock(dark_at, NOW))
         self.assertEqual(ask["page"], "")
         self.assertEqual(ask["meta"], "no word from it for 60m")
 
@@ -430,6 +430,16 @@ class PeopleLinks(Fixture):
 # ---------------------------------------------------------------- the command
 
 
+class Clock(unittest.TestCase):
+    def test_the_date_always_and_a_twelve_hour_time(self):
+        at = lambda *hm: time.mktime((2026, 3, 1, *hm, 0, 0, 0, -1))
+        self.assertEqual(loomui._clock(at(11, 0), NOW), "Mar 1, 11:00 AM")      # today too
+        self.assertEqual(loomui._clock(at(0, 5), NOW), "Mar 1, 12:05 AM")
+        self.assertEqual(loomui._clock(at(12, 0), NOW), "Mar 1, 12:00 PM")
+        self.assertEqual(loomui._clock(at(23, 59), NOW), "Mar 1, 11:59 PM")
+        self.assertEqual(loomui._clock(time.mktime((2025, 12, 31, 14, 2, 0, 0, 0, -1)), NOW), "Dec 31 2025, 2:02 PM")
+
+
 class Conversation(Fixture):
     """A conversation's own page (conv/<cid>): what came of it, from its bodies'
     `did` records, and its turns, from the board's events. Never its words."""
@@ -455,7 +465,7 @@ class Conversation(Fixture):
         page = loomui.page(self.view(), "conv/c-0007")
         check_page(self, page)
         self.assertEqual(page["title"], "Slack DM with Pat")
-        self.assertEqual(page["intro"], "1 turn since 11:00, the last 60m ago.")
+        self.assertEqual(page["intro"], "1 turn since Mar 1, 11:00 AM, the last 60m ago.")
         came = next(s for s in page["sections"] if s["id"] == "came-of-it")
         items = came["blocks"][0]["items"]
         self.assertEqual([(i["text"], i.get("page") or i.get("href")) for i in items], [
@@ -471,7 +481,7 @@ class Conversation(Fixture):
         who = next(s for s in page["sections"] if s["id"] == "who")["blocks"][0]["items"]
         self.assertEqual(who, [{"text": "Pat", "avatar": "P", "page": "loom:people/pat-lee"}])
         turns = next(s for s in page["sections"] if s["id"] == "turns")["blocks"][0]
-        self.assertEqual(turns["rows"], [["11:00", "12s", "1m", "Replied", "1"]])
+        self.assertEqual(turns["rows"], [["Mar 1, 11:00 AM", "12s", "1m", "Replied", "1"]])
 
     def test_its_rows_link_to_it(self):
         page = loomui.page(self.view(), "")

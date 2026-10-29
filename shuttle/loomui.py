@@ -51,11 +51,11 @@ def _secs(s):
 
 
 def _clock(t, now):
-    """13:02, or "Oct 23 13:02" when it wasn't today."""
+    """"Oct 29, 2:02 PM": always the date, today's too, and a 12-hour time; the year only when it isn't this one."""
     lt, ln = time.localtime(t), time.localtime(now)
-    if lt[:3] == ln[:3]:
-        return time.strftime("%H:%M", lt)
-    return time.strftime("%b %d %H:%M", lt)
+    hour = lt.tm_hour % 12 or 12
+    year = "" if lt.tm_year == ln.tm_year else f" {lt.tm_year}"
+    return f"{time.strftime('%b', lt)} {lt.tm_mday}{year}, {hour}:{lt.tm_min:02d} {'AM' if lt.tm_hour < 12 else 'PM'}"
 
 
 def _midnight(now):
