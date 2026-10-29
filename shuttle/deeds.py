@@ -108,7 +108,7 @@ def summarize(lines):
             memories += 1
         elif name in ("mcp__loom__knowledge_write", "mcp__loom__knowledge_verify"):
             slug = inp.get("slug") or inp.get("path")
-            if isinstance(slug, str) and slug:
+            if isinstance(slug, str) and re.fullmatch(r"[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*", slug) and ".." not in slug.split("/"):
                 knowledge.setdefault(slug[:120], "wrote" if name.endswith("write") else "checked")
         elif name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
             p = inp.get("file_path") or inp.get("notebook_path")

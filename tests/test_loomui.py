@@ -492,6 +492,21 @@ class Conversation(Fixture):
         came = next(s for s in page["sections"] if s["id"] == "came-of-it")
         self.assertIn("Nothing recorded yet", came["blocks"][0]["text"])
 
+    def test_a_bad_record_never_breaks_the_page(self):
+        """A did record is a body's word: junk in it is skipped, a bad slug isn't a link, and a record from
+        another bridge's body with the same id isn't this conversation's."""
+        self.events("2026-03", [
+            ev(NOW - 3000, "slack", "did", body="abcd1234", memories="lots", files=None, tools=["Bash"], tasks="t-1",
+               knowledge=[{"slug": "../../act/x?y", "did": "wrote"}, {"slug": "ok/page", "did": "wrote"}],
+               cost={"usd": "NaN", "ms": "x", "models": ["a"]}),
+            ev(NOW - 2999, "discord", "did", body="abcd1234", tasks=[{"id": "t-666", "did": ["close"]}]),
+        ])
+        page = loomui.page(self.view(), "conv/c-0007")
+        check_page(self, page)
+        items = next(s for s in page["sections"] if s["id"] == "came-of-it")["blocks"][0]["items"]
+        self.assertEqual([(i["text"], i.get("page")) for i in items], [("../../act/x?y", None), ("ok/page", "loom:knowledge/ok/page")])
+        self.assertNotIn("t-666", json.dumps(page))
+
     def test_unknown_or_malformed_is_not_found(self):
         for p in ("conv/c-4242", "conv/../x", "conv/"):
             self.assertEqual(loomui.page(self.view(), p)["title"], "Not found")

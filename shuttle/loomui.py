@@ -610,7 +610,7 @@ def _conv_records(now_dir, cid, since, now):
     """This conversation's turns (picked, finished, delivered) and the `did`
     records of the bodies that served it, in order."""
     turns, did = [], {}
-    bodies = set()
+    bodies = set()     # (agent, bridge, body): only records from the bodies this conversation's turns name
     for name in _months(since, now):
         try:
             f = open(Path(now_dir) / name, encoding="utf-8", errors="replace")
@@ -626,13 +626,14 @@ def _conv_records(now_dir, cid, since, now):
                 if not (since <= t <= now) or not isinstance(r, dict):
                     continue
                 kind = r.get("kind")
+                key = (r.get("agent"), r.get("bridge"), str(r.get("body") or "")[:8])
                 if r.get("cid") == cid and kind in ("picked", "finished", "delivered"):
                     turns.append(r)
-                    if isinstance(r.get("body"), str):
-                        bodies.add(r["body"][:8])
-                elif kind == "did" and isinstance(r.get("body"), str):
-                    did[r["body"][:8]] = r      # the latest is the whole session so far
-    return turns, {b: did[b] for b in bodies if b in did}
+                    if key[2]:
+                        bodies.add(key)
+                elif kind == "did" and key[2]:
+                    did[key] = r      # the latest is the whole session so far
+    return turns, {k: did[k] for k in bodies if k in did}
 
 
 def _verbs(v):
@@ -646,28 +647,47 @@ def _minutes(ms):
     return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h {s % 3600 // 60}m"
 
 
+SLUG = re.compile(r"[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*")
+
+
+def _int(v):
+    """A count from a record a body wrote: 0 for anything that isn't one."""
+    try:
+        return max(int(v), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _num(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return f if f == f and 0 <= f < 1e9 else 0.0
+
+
 def _came_of_it(did):
     """What the bodies did, together: a row each for its tasks, pull requests,
     knowledge and asks; the rest as a line."""
     tasks, prs, know, asks = {}, {}, {}, []
     memories = files = commits = pushes = 0
     for d in did.values():
-        for x in d.get("tasks") or []:
+        for x in d.get("tasks") if isinstance(d.get("tasks"), list) else []:
             if isinstance(x, dict) and re.fullmatch(r"t-\d+", str(x.get("id"))):
                 tasks.setdefault(x["id"], [])
-                tasks[x["id"]] += [v for v in (x.get("did") or []) if v not in tasks[x["id"]]]
-        for x in d.get("prs") or []:
+                tasks[x["id"]] += [v for v in (x.get("did") if isinstance(x.get("did"), list) else []) if isinstance(v, str) and v not in tasks[x["id"]]]
+        for x in d.get("prs") if isinstance(d.get("prs"), list) else []:
             ref = str(x.get("ref") if isinstance(x, dict) else "")
             if re.fullmatch(r"[\w.-]+/[\w.-]+#\d+", ref) and prs.get(ref) != "merged":
-                prs[ref] = x.get("did") or "opened"
-        for x in d.get("knowledge") or []:
+                prs[ref] = "merged" if x.get("did") == "merged" else "opened"
+        for x in d.get("knowledge") if isinstance(d.get("knowledge"), list) else []:
             if isinstance(x, dict) and isinstance(x.get("slug"), str):
-                know.setdefault(x["slug"], x.get("did") or "wrote")
-        asks += [x for x in d.get("asks") or [] if isinstance(x, dict)]
-        memories += int(d.get("memories") or 0)
-        files += int(d.get("files") or 0)
-        commits += int(d.get("commits") or 0)
-        pushes += int(d.get("pushes") or 0)
+                know.setdefault(x["slug"][:120], x.get("did"))
+        asks += [x for x in (d.get("asks") if isinstance(d.get("asks"), list) else []) if isinstance(x, dict)]
+        memories += _int(d.get("memories"))
+        files += _int(d.get("files"))
+        commits += _int(d.get("commits"))
+        pushes += _int(d.get("pushes"))
     items = []
     for tid, v in tasks.items():
         items.append({"text": tid, "meta": f"Task · {_verbs(v) or 'touched'}", "page": f"loom:p/tasks/task/{tid}"})
@@ -675,10 +695,14 @@ def _came_of_it(did):
         repo, n = ref.split("#")
         items.append({"text": ref, "meta": f"Pull request · {v}", "href": f"https://github.com/{repo}/pull/{n}"})
     for slug, v in know.items():
-        items.append({"text": slug, "meta": f"Knowledge · {'wrote' if v == 'wrote' else 'checked'}", "page": f"loom:knowledge/{slug}"})
+        # Linked only when it's a page's path: a body wrote this record, and loom refuses a whole page for one bad link.
+        ok = SLUG.fullmatch(slug) and ".." not in slug.split("/")
+        items.append({"text": slug, "meta": f"Knowledge · {'wrote' if v == 'wrote' else 'checked'}", **({"page": f"loom:knowledge/{slug}"} if ok else {})})
     for a in asks:
         what = str(a.get("what") or "")[:80]
         text = f"Asked for a token: {what}" if a.get("kind") == "secret" else f"Asked for your OK: {what}"
+        if not what:
+            continue
         items.append({"text": text, "meta": "In the Inbox", "page": "loom:inbox"})
     line = [x for x in (memories and f"{memories} {'memory' if memories == 1 else 'memories'} saved",
                         files and _plural(files, "file") + " changed",
@@ -733,14 +757,14 @@ def _conv_page(view, cid):
     if costs or did:
         tools = {}
         for d in did.values():
-            for k, n in (d.get("tools") or {}).items():
-                tools[k] = tools.get(k, 0) + int(n or 0)
-        models = sorted({m for c in costs for m in (c.get("models") or {})})
+            for k, n in (d.get("tools") if isinstance(d.get("tools"), dict) else {}).items():
+                tools[str(k)[:60]] = tools.get(str(k)[:60], 0) + _int(n)
+        models = sorted({str(m)[:60] for c in costs for m in (c.get("models") if isinstance(c.get("models"), dict) else {})})
         kv = []
         if costs:
-            kv.append({"label": "Time worked", "value": _minutes(sum(int(c.get("ms") or 0) for c in costs))})
-            kv.append({"label": "Cost", "value": f"${sum(float(c.get('usd') or 0) for c in costs):.2f}"})
-            lines = [(int(c.get("added") or 0), int(c.get("removed") or 0)) for c in costs]
+            kv.append({"label": "Time worked", "value": _minutes(sum(_int(c.get("ms")) for c in costs))})
+            kv.append({"label": "Cost", "value": f"${sum(_num(c.get('usd')) for c in costs):.2f}"})
+            lines = [(_int(c.get("added")), _int(c.get("removed"))) for c in costs]
             if any(a or r for a, r in lines):
                 kv.append({"label": "Lines", "value": f"+{sum(a for a, _ in lines)} −{sum(r for _, r in lines)}"})
         if models:
