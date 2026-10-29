@@ -14,6 +14,7 @@ Read-only, stdlib only, and it never prints a conversation's content or a
 body's id: only venues, people's display names, counts and timings, the same as
 the board. loom renders it; installing the shuttle is all it takes.
 """
+from datetime import datetime, timezone
 import json
 import statistics
 import time
@@ -257,7 +258,33 @@ def manifest(view):
              "page": "", "label": "Look", **({"agent": view.agent_slug} if view.agent_slug else {})} for b in dark][:10]
     # owners: 2: an agent owner sees these bridges only if they own the agent they serve.
     # Each agent's people and channels on its own Bridges tab (loom docs/extensions.md, agentTab).
-    return {"v": 2, "owners": 2, "tab": {"label": "Bridges"}, "agentTab": {"label": "Bridges"}, "tile": tile, "asks": asks}
+    m = {"v": 2, "owners": 2, "tab": {"label": "Bridges"}, "agentTab": {"label": "Bridges"}, "tile": tile, "asks": asks}
+    doing = _doing(view)
+    if doing and view.agent_slug:
+        m["agents"] = {view.agent_slug: {"doing": doing}}
+    return m
+
+
+def _doing(view):
+    """What the agent these bridges serve has going, for its card on loom's Home (loom's `doing`): each
+    conversation one of its bodies is in, simply. The details are on the Bridges page."""
+    out = []
+    for b in view.bridges:
+        if b["dark"]:
+            continue
+        for t in b["snap"].get("talking") or []:
+            who = [w for w in (t.get("who") or []) if isinstance(w, str)]
+            where = _where(b["name"], t.get("venue"))
+            text = (f"Talking with {', '.join(who)}" if where in ("DM", "group DM") and who
+                    else f"Talking in {where}" if where != "?" else "A conversation")
+            bits = [_title(b["name"]) + (f" {where}" if where in ("DM", "group DM") else ""),
+                    f"active {_ago(t.get('active_s') or 0)} ago"] + (["stalled"] if t.get("stalled") else [])
+            d = {"text": text[:100], "kind": "talk", "where": " · ".join(bits)}
+            since = t.get("body_since")
+            if isinstance(since, (int, float)) and since > 0:
+                d["since"] = datetime.fromtimestamp(since, timezone.utc).isoformat().replace("+00:00", "Z")
+            out.append(d)
+    return out[:6]
 
 
 def _activity(view):

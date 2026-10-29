@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 """loomui: the shuttle on loom's page (contract v2), from fixture now-dirs."""
 import json
 import os
@@ -145,6 +146,21 @@ class Manifest(Fixture):
         self.assertEqual(m["tile"], {"label": "Bridges", "value": "2 live", "detail": "#general, now",
                                      "tone": "ok", "page": ""})
         self.assertEqual(m["asks"], [])
+
+    def test_each_conversation_is_the_agents_doing(self):
+        # loom's Home card says, simply, what the agent has going: a conversation per body.
+        self.write(snap("chat", NOW - 5, talking=[{"venue": "#general", "who": ["Pat"], "active_s": 60, "body_since": NOW - 300},
+                                                   {"venue": "chat-dm", "who": ["Sam Lee"], "active_s": 5, "stalled": True}]))
+        self.write(snap("talk", NOW - 9999))   # dark: says nothing
+        m = loomui.manifest(self.view(agent_slug="robin"))
+        self.assertEqual(m["agents"], {"robin": {"doing": [
+            {"text": "Talking in #general", "kind": "talk", "where": "Chat · active 60s ago",
+             "since": datetime.fromtimestamp(NOW - 300, timezone.utc).isoformat().replace("+00:00", "Z")},
+            {"text": "Talking with Sam Lee", "kind": "talk", "where": "Chat DM · active 5s ago · stalled"},
+        ]}})
+        # Nobody talking, or no agent to say it of: no agents key at all.
+        self.write(snap("chat", NOW - 5))
+        self.assertNotIn("agents", loomui.manifest(self.view(agent_slug="robin")))
 
     def test_detail_is_the_latest_conversation_else_idle(self):
         self.write(snap("chat", NOW - 5))
