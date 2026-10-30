@@ -21,6 +21,7 @@ $SHUTTLE_INSTANCE.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +39,8 @@ def _ago(t, now):
     if not t:
         return "never"
     s = int(now - t)
+    if s < 60:
+        return "just now"
     return f"{s // 60}m ago" if s < 3600 else f"{s // 3600}h ago" if s < 86400 else f"{s // 86400}d ago"
 
 
@@ -47,7 +50,7 @@ def _usage(sub, now):
     for w, label in (("5h", "5 hours"), ("7d", "7 days")):
         if u.get(w) is not None:
             reset = u.get(f"reset_{w}")
-            parts.append(f"{label} {u[w]:.0%}" + (f" (resets {time.strftime('%a %H:%M', time.localtime(reset))})" if reset else ""))
+            parts.append(f"{label} {u[w]:.0%}" + (f" (resets {_when(reset)})" if reset else ""))
     return (" · ".join(parts) + f", checked {_ago(u.get('checked'), now)}") if parts else "not read yet"
 
 
@@ -125,6 +128,21 @@ DAY_S = 86400
 
 def _when(t):
     return time.strftime("%a %-I:%M %p", time.localtime(t))
+
+
+# The date shuttle's own sign-in writes into a credential's note (shuttle/signin.py), as a
+# person reads it: "signed in from loom's page Oct 25". The rest of a note is shown as written.
+SIGNED_IN = re.compile(r"(signed in from loom's page )(\d{4})-(\d{2})-(\d{2})\b")
+
+
+def _note(note, now):
+    def day(m):
+        y, mo, dd = int(m[2]), int(m[3]), int(m[4])
+        if not (1 <= mo <= 12 and 1 <= dd <= 31):
+            return m[0]
+        month = time.strftime("%b", time.struct_time((y, mo, dd, 0, 0, 0, 0, 1, -1)))
+        return f"{m[1]}{month} {dd}" + ("" if y == time.localtime(now).tm_year else f", {y}")
+    return SIGNED_IN.sub(day, note)
 
 
 def _meters(d, now):
@@ -258,7 +276,7 @@ def overview(d, now):
             runs.setdefault(s_, []).append(agent.capitalize())
     for name, sub in sorted(d["subscriptions"].items())[:5]:
         rows = [[subs.KINDS[c["kind"]], subs.describe(c), c.get("status", "unknown") + (f" ({c['error'][:60]})" if c.get("error") else ""),
-                 _ago(c.get("checked"), now), c.get("note", "")[:80]] for c in sub["credentials"]]
+                 _ago(c.get("checked"), now), _note(c.get("note", ""), now)[:80]] for c in sub["credentials"]]
         buttons = [{"action": "check", "label": "Check now", "fields": {"sub": name}}]
         harness = "claude" if sub["provider"] == "anthropic" else "codex"
         if signin.installed(harness):

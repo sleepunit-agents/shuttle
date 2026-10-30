@@ -44,6 +44,23 @@ def _ago(seconds):
     return f"{seconds // 3600}h"
 
 
+def _ago_phrase(seconds):
+    """An "ago" phrase: "just now" under a minute ("0s ago" reads as a glitch), else "3m ago"."""
+    return "just now" if seconds < 60 else f"{_ago(seconds)} ago"
+
+
+# A model id as people say it: "claude-opus-5-5" is "Opus 5.5" (a dated or [1m] variant too).
+# An id this doesn't know is left as it was.
+MODEL = re.compile(r"(?:claude-)?(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?", re.I)
+
+
+def _model(m):
+    x = MODEL.fullmatch(str(m))
+    if not x:
+        return str(m)
+    return f"{x[1].capitalize()} {x[2]}" + (f".{x[3]}" if x[3] else "")
+
+
 def _secs(s):
     s = float(s)
     if s < 90:
@@ -299,7 +316,7 @@ def _doing(view):
             text = (f"Talking with {', '.join(who)}" if where in ("DM", "group DM") and who
                     else f"Talking in {where}" if where != "?" else "A conversation")
             bits = [_title(b["name"]) + (f" {where}" if where in ("DM", "group DM") else ""),
-                    f"active {_ago(t.get('active_s') or 0)} ago"] + (["stalled"] if t.get("stalled") else [])
+                    f"active {_ago_phrase(t.get('active_s') or 0)}"] + (["stalled"] if t.get("stalled") else [])
             d = {"text": text[:100], "kind": "talk", "where": " · ".join(bits)}
             if CID.fullmatch(str(t.get("cid") or "")):
                 d["page"] = f"conv/{t['cid']}"
@@ -327,7 +344,7 @@ def _activity(view):
     if last is None:
         return "idle"
     t, bridge, venue, who = last
-    return f"{_place(bridge, venue, who)}, {_ago(view.now - t)} ago"
+    return f"{_place(bridge, venue, who)}, {_ago_phrase(view.now - t)}"
 
 
 def _place(bridge, venue, who):
@@ -455,7 +472,7 @@ def _bridge_section(view, b):
                "detail": f"max {_secs(max(waits))}"} if waits
               else {"label": "Pickup, 24h", "value": "none"})
     stats = [
-        {"label": "State", "value": state, "detail": f"checked {_ago(now - b['at'])} ago", "tone": tone},
+        {"label": "State", "value": state, "detail": f"checked {_ago_phrase(now - b['at'])}", "tone": tone},
         {"label": "Bodies", "value": f"{slots.get('used', 0)}/{slots.get('cap', '?')}", "detail": _bodies_detail(b)},
         {"label": "Today", "value": _plural(st["turns"], "turn"), "detail": f"{st['sent']} sent"},
         pickup,
@@ -597,7 +614,7 @@ def _rules(rules):
         {"type": "kv", "items": [
             {"label": "Guests can't use", "value": tools(rules.get("guest_deny") or [])},
             {"label": "Nobody can use", "value": tools(rules.get("always_deny") or [])},
-            {"label": "Model for new conversations", "value": str(model)},
+            {"label": "Model for new conversations", "value": _model(model)},
         ]},
         {"type": "text", "text": "Set in the shuttle instance file, not here.", "tone": "muted"},
     ]}
@@ -751,12 +768,12 @@ def _conv_page(view, cid):
              else f"{where} on {_title(bridge)}" if where != "?" else f"A conversation on {_title(bridge)}")
     when = [r["t"] for r in picked]
     agent = view.agent_name or "The agent"
-    intro = (f"{agent} has answered {_plural(len(picked), 'turn')} here since {_clock(when[0], now)}, the last {_ago(now - when[-1])} ago."
+    intro = (f"{agent} has answered {_plural(len(picked), 'turn')} here since {_clock(when[0], now)}, the last {_ago_phrase(now - when[-1])}."
              if when else f"{agent} has had no turns here in the last {CONV_DAYS} days.")
     sections = []
     if live:
         t = live[1]
-        bits = [f"active {_ago(t.get('active_s') or 0)} ago"] + (["stalled"] if t.get("stalled") else []) \
+        bits = [f"active {_ago_phrase(t.get('active_s') or 0)}"] + (["stalled"] if t.get("stalled") else []) \
             + ([f"{t['queued']} queued"] if t.get("queued") else [])
         sections.append({"id": "now", "blocks": [{"type": "callout", "tone": "warn" if t.get("stalled") else "ok",
                                                   "title": "Talking now", "text": " · ".join(bits)}]})
@@ -786,7 +803,7 @@ def _conv_page(view, cid):
             if any(a or r for a, r in lines):
                 kv.append({"label": "Lines", "value": f"+{sum(a for a, _ in lines)} −{sum(r for _, r in lines)}"})
         if models:
-            kv.append({"label": "Models", "value": ", ".join(m.replace("claude-", "") for m in models)})
+            kv.append({"label": "Models", "value": ", ".join(dict.fromkeys(_model(m) if MODEL.fullmatch(m) else m.replace("claude-", "") for m in models))})
         kv.append({"label": "Bodies", "value": str(len(did))})
         if tools:
             top = sorted(tools.items(), key=lambda kv_: -kv_[1])[:6]

@@ -161,7 +161,7 @@ class Manifest(Fixture):
         self.assertEqual(m["agents"], {"robin": {"doing": [
             {"text": "Talking in #general", "kind": "talk", "where": "Chat · active 60s ago",
              "since": datetime.fromtimestamp(NOW - 300, timezone.utc).isoformat().replace("+00:00", "Z")},
-            {"text": "Talking with Sam Lee", "kind": "talk", "where": "Chat DM · active 5s ago · stalled"},
+            {"text": "Talking with Sam Lee", "kind": "talk", "where": "Chat DM · active just now · stalled"},
         ]}})
         # Nobody talking, or no agent to say it of: no agents key at all.
         self.write(snap("chat", NOW - 5))
@@ -265,7 +265,7 @@ class Page(Fixture):
         self.assertEqual(p["sections"][1]["title"], "Now")
         [now] = p["sections"][1]["blocks"]
         self.assertEqual(stats["items"], [
-            {"label": "State", "value": "running", "detail": "checked 4s ago", "tone": "ok"},
+            {"label": "State", "value": "running", "detail": "checked just now", "tone": "ok"},
             {"label": "Bodies", "value": "1/5", "detail": "1 talking, 1 waiting"},
             {"label": "Today", "value": "2 turns", "detail": "1 sent"},
             {"label": "Pickup, 24h", "value": "median 24s", "detail": "max 28s"},
@@ -312,6 +312,20 @@ class Page(Fixture):
         self.assertEqual(sec["blocks"][0]["items"], [
             {"text": "Pat", "meta": "Chat · #general · 2 turns", "avatar": "P", "page": "conv/c-1"},
             {"text": "Sam Lee", "meta": "Talk · DM · 1 turn", "avatar": "SL", "page": "conv/c-2"}])
+
+    def test_ago_phrases_say_just_now_under_a_minute(self):
+        self.assertEqual([loomui._ago_phrase(x) for x in (0, 5, 59, 60, 600, 7200)],
+                         ["just now", "just now", "just now", "60s ago", "10m ago", "2h ago"])
+        self.assertEqual(loomui._ago(0), "0s")             # a cell or a duration keeps its number
+
+    def test_model_ids_read_as_people_say_them(self):
+        self.assertEqual([loomui._model(m) for m in ("claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001",
+                                                     "claude-fable-1-2[1m]", "opus-5-5", "model-x", "the runner's default")],
+                         ["Opus 5.5", "Sonnet 5", "Haiku 4.5", "Fable 1.2", "Opus 5.5", "model-x", "the runner's default"])
+
+    def test_house_rules_name_a_known_model(self):
+        kv = self.section(self.page(rules={"preferred_model": "claude-opus-5-5"}), "house-rules")["blocks"][0]["items"]
+        self.assertEqual(kv[2], {"label": "Model for new conversations", "value": "Opus 5.5"})
 
     def test_house_rules(self):
         rules = self.section(self.page(), "house-rules")
@@ -480,7 +494,7 @@ class Conversation(Fixture):
         self.assertEqual(came["blocks"][1]["text"], "2 memories saved · 3 files changed · 1 commit · 1 push.")
         self.assertNotIn("t-9", json.dumps(page))          # only this conversation's bodies
         work = {i["label"]: i["value"] for i in next(s for s in page["sections"] if s["id"] == "work")["blocks"][0]["items"]}
-        self.assertEqual((work["Time worked"], work["Cost"], work["Lines"], work["Models"]), ("89s", "$0.99", "+3 −1", "opus-5-5"))
+        self.assertEqual((work["Time worked"], work["Cost"], work["Lines"], work["Models"]), ("89s", "$0.99", "+3 −1", "Opus 5.5"))
         who = next(s for s in page["sections"] if s["id"] == "who")["blocks"][0]["items"]
         self.assertEqual(who, [{"text": "Robin", "agent": "robin", "meta": "Answers here", "page": "loom:a/robin"},
                                {"text": "Pat", "avatar": "P", "page": "loom:people/pat-lee"}])

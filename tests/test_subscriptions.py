@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -496,6 +497,50 @@ class LoginWords(unittest.TestCase):
         m = self.tool._meters(d, 100)
         self.assertEqual([(i["label"], i["value"], i.get("tone")) for i in m],
                          [("Main · 5 hours", 0.27, None), ("Main · 7 days", 0.88, "warn")])
+
+
+class PlainWords(LoginWords):
+    """Fuel's labels as a person reads them: no "0m ago", no 24-hour clock, no ISO date."""
+
+    def test_under_a_minute_is_just_now(self):
+        ago = self.tool._ago
+        self.assertEqual([ago(1000 - s, 1000) for s in (0, 30, 59)], ["just now"] * 3)
+        self.assertEqual((ago(1000 - 60, 1000), ago(1000 - 7200, 1000), ago(None, 1000)), ("1m ago", "2h ago", "never"))
+
+    def test_a_meter_read_just_now_says_so(self):
+        now = time.mktime((2026, 3, 2, 9, 0, 0, 0, 0, -1))
+        reset = time.mktime((2026, 3, 2, 17, 0, 0, 0, 0, -1))   # a Monday, 5 PM local
+        d = {"subscriptions": {"main": {"label": "Main", "usage": {"5h": 0.27, "reset_5h": reset, "checked": now}}}}
+        self.assertEqual(self.tool._meters(d, now)[0]["detail"], "resets Mon 5:00 PM · read just now")
+
+    def test_the_cli_usage_line_is_a_12_hour_clock(self):
+        reset = time.mktime((2026, 3, 2, 17, 0, 0, 0, 0, -1))
+        line = self.tool._usage({"usage": {"5h": 0.5, "reset_5h": reset, "checked": reset}}, reset)
+        self.assertEqual(line, "5 hours 50% (resets Mon 5:00 PM), checked just now")
+
+    def test_a_sign_in_note_dates_like_a_person(self):
+        now = time.mktime((2026, 10, 30, 12, 0, 0, 0, 0, -1))
+        note = self.tool._note
+        self.assertEqual(note("signed in from loom's page 2026-10-25; refreshed only here", now),
+                         "signed in from loom's page Oct 25; refreshed only here")
+        self.assertEqual(note("this machine's session login, signed in from loom's page 2026-10-25", now),
+                         "this machine's session login, signed in from loom's page Oct 25")
+        self.assertEqual(note("signed in from loom's page 2025-12-03", now), "signed in from loom's page Dec 3, 2025")
+        self.assertEqual(note("Pat's spare, 2026-10-25", now), "Pat's spare, 2026-10-25", "a note someone wrote stays as written")
+
+    def test_the_credentials_table_shows_the_note_that_way(self):
+        now = time.mktime((2026, 10, 30, 12, 0, 0, 0, 0, -1))
+        d = {"subscriptions": {"main": {"label": "Main", "provider": "anthropic", "usage": {}, "credentials": [
+            {"kind": "session", "where": {"secret": "x"}, "status": "valid", "checked": now - 5,
+             "note": "signed in from loom's page 2026-10-25; refreshed only here"}]}}, "assign": {}}
+        from unittest import mock
+        with mock.patch.object(self.tool.signin, "installed", return_value=False):
+            page = self.tool.overview(d, now)
+        sub = next(s for s in page["sections"] if s["id"] == "sub-main")
+        row = sub["blocks"][1]["blocks"][0]["rows"][0]
+        self.assertEqual(row[3:], ["just now", "signed in from loom's page Oct 25; refreshed only here"])
+        logins = next(s for s in page["sections"] if s["id"] == "logins")["blocks"][0]["items"]
+        self.assertEqual(logins[0]["meta"], "just now")
 
 
 class Tile(LoginWords):
