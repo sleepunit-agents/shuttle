@@ -248,5 +248,36 @@ class ChannelsHardening(unittest.TestCase):
         self.assertIn("Webhook peers", [i["label"] for i in d[0]["blocks"][0]["items"]])
 
 
+class SnapshotReads(unittest.TestCase):
+    """A page reads each collection once, whatever it looks up (each `loom store` is a node process)."""
+
+    def test_one_list_per_collection_and_the_same_answers(self):
+        st = Store()
+        st.put(gates.PEOPLE, "ada", DOC)
+        st.put(gates.CHANNELS, "ada", {"answers": {"1": "general"}})
+        st.put(gates.CHANNELS, "bo", {"answers": {"1": "general"}})
+        calls = []
+
+        def store(*args, stdin=None, env=None):
+            calls.append(args)
+            c = args[1]
+            rows = [{"key": k, "doc": d, "rev": r} for (cc, k), (d, r) in st.d.items() if cc == c]
+            return type("R", (), {"returncode": 0, "stdout": json.dumps(rows), "stderr": ""})()
+
+        snap = gates.Snapshot(store)
+        self.assertEqual(gates_page.asks(snap.get, snap.keys), gates_page.asks(st.get, st.keys))
+        self.assertEqual(snap.get(gates.PEOPLE, "ada"), (DOC, 1))
+        self.assertEqual(snap.get(gates.PEOPLE, "nobody"), (None, 0))
+        self.assertEqual(sorted(snap.keys(gates.CHANNELS)), ["ada", "bo"])
+        self.assertEqual(sorted(c[1] for c in calls), sorted(set(c[1] for c in calls)))   # each listed once
+
+    def test_a_failed_list_is_an_error_for_get_and_empty_for_keys(self):
+        fail = lambda *a, **k: type("R", (), {"returncode": 1, "stdout": "", "stderr": "down"})()   # noqa: E731
+        snap = gates.Snapshot(fail)
+        self.assertEqual(snap.keys(gates.OFFERS), [])
+        with self.assertRaises(OSError):
+            snap.get(gates.PEOPLE, "ada")
+
+
 if __name__ == "__main__":
     unittest.main()

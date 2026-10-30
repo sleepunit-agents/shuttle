@@ -120,7 +120,8 @@ def agent_bridges_page(inst, agent, household_page):
     """One agent's Bridges: its people and channels; the house rules when these bridges are its."""
     sections = []
     try:
-        sec = gates_page.agent_section(agent)
+        snap = gates.Snapshot()
+        sec = gates_page.agent_section(agent, snap.get, snap.keys)
     except (OSError, ValueError) as e:
         sec = {"id": "people", "title": "People and channels", "blocks": [
             {"type": "text", "tone": "bad", "text": f"loom's store didn't answer: {e}"}]}
@@ -137,6 +138,11 @@ def agent_bridges_page(inst, agent, household_page):
 
 class _Store:
     get, put, delete, docs = staticmethod(gates.get), staticmethod(gates.put), staticmethod(gates.delete), staticmethod(gates.docs)
+
+
+def _snapshot():
+    snap = gates.Snapshot()
+    return snap.get, snap.keys
 
 
 def _people_of(inst):
@@ -181,7 +187,7 @@ def main(argv):
         # Each agent's people and channels (its gates), a household owner's alone.
         if path.startswith(("people/", "channels/")):
             pg = (gates_page.people_page(path[len("people/"):]) if path.startswith("people/")
-                  else gates_page.channels_page(path[len("channels/"):]))
+                  else gates_page.channels_page(path[len("channels/"):], *_snapshot()))
             print(json.dumps(pg if own is None else {"title": "Not found", "sections": []}))
             return 0
         scope = os.environ.get("LOOM_SCOPE", "").strip()
@@ -196,9 +202,10 @@ def main(argv):
             out["sections"] = [x for x in out.get("sections", []) if x.get("id") not in ("signin", "house-rules")]
         elif path == "":
             try:
-                agents = sorted(set(gates.list_keys(gates.PEOPLE)) | set(gates.list_keys(gates.OFFERS))
-                                | set(gates.list_keys(gates.CHANNELS)) | {inst.agent_slug}
-                                | {x["page"].split("/", 1)[1] for x in gates_page.asks() if x["page"].startswith("channels/")})
+                snap = gates.Snapshot()
+                agents = sorted(set(snap.keys(gates.PEOPLE)) | set(snap.keys(gates.OFFERS))
+                                | set(snap.keys(gates.CHANNELS)) | {inst.agent_slug}
+                                | {x["page"].split("/", 1)[1] for x in gates_page.asks(snap.get, snap.keys) if x["page"].startswith("channels/")})
                 loom_agents = household_agents()
                 # Each agent's people and channels are on its own Bridges tab: here, one link each.
                 people = [{"id": "people", "title": "People and channels", "side": True, "blocks": [
@@ -218,7 +225,8 @@ def main(argv):
         return 0
     m = loomui.manifest(loomui.View.of(instance.load()))
     try:   # what only a household owner decides: offers to check, channels two agents claim
-        m["asks"] = (m.get("asks") or []) + gates_page.asks()
+        snap = gates.Snapshot()
+        m["asks"] = (m.get("asks") or []) + gates_page.asks(snap.get, snap.keys)
         m["asks"] = m["asks"][:10]
     except (OSError, ValueError) as e:
         print(f"loom-shuttle: asks from the store failed ({e})", file=sys.stderr)

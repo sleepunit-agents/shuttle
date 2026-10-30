@@ -87,6 +87,34 @@ def list_keys(collection):
     return [d["key"] for d in json.loads(r.stdout or "[]")]
 
 
+class Snapshot:
+    """One read of each collection, for a page or manifest that looks up many documents: `get` and `keys` as
+    above, from a single `loom store list` per collection, not a process per document. Each `loom store` is a
+    whole node process, and the manifest looked up every agent's channels and route offer one at a time on
+    each tick (seen at 107% CPU, 2026-10-30). Only for reading: nothing here sees a write made after it read."""
+
+    def __init__(self, store=None):
+        self._store = store or _store
+        self._lists = {}
+
+    def _list(self, collection):
+        if collection not in self._lists:
+            r = self._store("list", collection, "--limit", "1000")
+            if r.returncode != 0:
+                raise OSError(f"loom store: {r.stderr.strip()[:200]}")
+            self._lists[collection] = {d["key"]: (d.get("doc"), d.get("rev", 0)) for d in json.loads(r.stdout or "[]")}
+        return self._lists[collection]
+
+    def get(self, collection, key):
+        return self._list(collection).get(key, (None, 0))
+
+    def keys(self, collection):
+        try:
+            return list(self._list(collection))
+        except OSError:
+            return []
+
+
 def valid(doc):
     """Why a people document isn't one, or None."""
     if not isinstance(doc, dict):
