@@ -188,6 +188,7 @@ class Manifest(Fixture):
         self.assertEqual(m["tile"]["tone"], "bad")
         [ask] = m["asks"]
         self.assertEqual(ask["text"], "Talk bridge is dark since " + loomui._clock(dark_at, NOW))
+        self.assertEqual(ask["kind"], "alert", "something to look at, not a decision")
         self.assertEqual(ask["page"], "")
         self.assertEqual(ask["meta"], "no word from it for 60m")
 
