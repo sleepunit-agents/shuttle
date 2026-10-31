@@ -297,7 +297,9 @@ def manifest(view):
              "page": "", "label": "Look", "kind": "alert", **({"agent": view.agent_slug} if view.agent_slug else {})} for b in dark][:10]
     # owners: 2: an agent owner sees these bridges only if they own the agent they serve.
     # Each agent's people and channels on its own Bridges tab (loom docs/extensions.md, agentTab).
-    m = {"v": 2, "owners": 2, "tab": {"label": "Bridges"}, "agentTab": {"label": "Bridges"}, "tile": tile, "asks": asks}
+    # The household's Bridges is a setting (loom's More), not a place you go every day (the owner, 2026-10-31); each
+    # agent's own Bridges tab stays on its pages.
+    m = {"v": 2, "owners": 2, "tab": {"label": "Bridges", "kind": "setting"}, "agentTab": {"label": "Bridges"}, "tile": tile, "asks": asks}
     doing = _doing(view)
     if doing and view.agent_slug:
         m["agents"] = {view.agent_slug: {"doing": doing}}
