@@ -147,7 +147,7 @@ class Manifest(Fixture):
         self.write(snap("talk", NOW - 2, interval=5, socket={"state": "up"}))
         m = loomui.manifest(self.view())
         self.assertEqual(m["v"], 2)
-        self.assertEqual(m["tab"], {"label": "Bridges"})
+        self.assertEqual(m["tab"], {"label": "Bridges", "kind": "setting"})
         self.assertEqual(m["tile"], {"label": "Bridges", "value": "2 live", "detail": "#general, now",
                                      "tone": "ok", "page": ""})
         self.assertEqual(m["asks"], [])
